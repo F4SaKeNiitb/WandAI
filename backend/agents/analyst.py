@@ -79,12 +79,15 @@ Respond in JSON format:
 }}
 
 If not creating a chart, set chart_config to null."""),
-            ("user", f"Task: {task_description}\n\nAvailable context:\n{context}")
+            ("user", "Task: {task}\n\nAvailable context:\n{context}")
         ])
         
         try:
             plan_chain = planning_prompt | self.llm | JsonOutputParser()
-            plan = await plan_chain.ainvoke({})
+            plan = await plan_chain.ainvoke({
+                "task": task_description,
+                "context": context
+            })
             
             task_type = plan.get("task_type", "analysis")
             results = {}
@@ -149,14 +152,23 @@ Provide:
 The code should:
 1. Create sample/demo data OR process provided data
 2. Print a JSON object with format:
-   {{"labels": [...], "values": [...], "datasets": [{"label": "...", "data": [...]}]}}
+   {{"labels": [...], "values": [...], "datasets": [{{ "label": "...", "data": [...] }}]}}
+
+3. Return your code in JSON format:
+{{
+    "code": "<your python code here>",
+    "explanation": "<brief explanation>"
+}}
 
 Available libraries: json, datetime, random (for demo data)"""),
-                    ("user", f"Create data for: {chart_config.get('data_description', task_description)}\n\nContext: {context}")
+                    ("user", "Create data for: {data_desc}\n\nContext: {context}")
                 ])
                 
                 data_chain = data_gen_prompt | self.llm | JsonOutputParser()
-                data_result = await data_chain.ainvoke({})
+                data_result = await data_chain.ainvoke({
+                    "data_desc": chart_config.get('data_description', task_description),
+                    "context": context
+                })
                 
                 code = data_result.get("code", "")
                 if code:

@@ -10,6 +10,9 @@ import uuid
 
 from core.state import AgentState, ExecutionStatus
 from core.graph import WorkflowManager
+from core.logging import get_logger
+
+logger = get_logger('API')
 
 router = APIRouter(prefix="/api", tags=["orchestration"])
 
@@ -305,9 +308,9 @@ async def get_session_status(session_id: str):
         artifacts_list = []
         for k, v in artifacts.items():
             if hasattr(v, 'name'):
-                artifacts_list.append({"id": k, "name": v.name, "type": v.type})
+                artifacts_list.append({"id": k, "name": v.name, "type": v.type, "content": v.content})
             elif isinstance(v, dict):
-                artifacts_list.append({"id": k, "name": v.get('name', k), "type": v.get('type', 'text')})
+                artifacts_list.append({"id": k, "name": v.get('name', k), "type": v.get('type', 'text'), "content": v.get('content')})
         
         logs = state.get('logs', [])
         logs_list = []
@@ -343,7 +346,7 @@ async def get_session_status(session_id: str):
             total_steps=len(state.plan),
             plan=[s.model_dump() for s in state.plan],
             artifacts=[
-                {"id": k, "name": v.name, "type": v.type}
+                {"id": k, "name": v.name, "type": v.type, "content": v.content}
                 for k, v in state.artifacts.items()
             ],
             logs=[l.model_dump() for l in state.logs[-20:]],
@@ -466,133 +469,38 @@ async def send_chat_message(
     """
     wm = get_workflow_manager()
     
-    # Check state in DB
-    config_dict = {"configurable": {"thread_id": request.session_id}}
-    snapshot = await wm.graph.aget_state(config_dict)
-    
-    if not snapshot or not snapshot.values:
-        if request.session_id not in sessions:
-            raise HTTPException(status_code=404, detail="Session not found")
-        state = sessions[request.session_id]
-    else:
-        state = snapshot.values
-    
-    # Store the user message in conversation history
-    from datetime import datetime
-    
-    if isinstance(state, dict):
-        history = state.get('conversation_history') or []
-        logs = state.get('logs') or []
-        
-        history.append({
-            "role": "user",
-            "content": request.message,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        logs.append({
-            "timestamp": datetime.now().isoformat(),
-            "agent_type": "orchestrator",
-            "message": f"User message: {request.message[:100]}{'...' if len(request.message) > 100 else ''}",
-            "level": "info",
-            "data": {}
-        })
-        
-        # Persist to DB
-        await wm.graph.aupdate_state(config_dict, {
-            "conversation_history": history,
-            "logs": logs
-        })
-        
-        # Update local state variable for next steps
-        state['conversation_history'] = history
-        state['logs'] = logs
-    else:
-        # Fallback for object state (legacy/local)
-        if not hasattr(state, 'conversation_history') or state.conversation_history is None:
-            state.conversation_history = []
-        
-        state.conversation_history.append({
-            "role": "user",
-            "content": request.message,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        from core.state import AgentType
-        state.add_log(
-            AgentType.ORCHESTRATOR,
-            f"User message: {request.message[:100]}{'...' if len(request.message) > 100 else ''}",
-            level="info"
-        )
-    
-    wm = get_workflow_manager()
-    
     # Process chat message asynchronously
     async def process_chat():
         try:
-            response = await wm.handle_chat_message(request.session_id, request.message, state)
+            # We don't need to manually update state here because wm.handle_chat_message
+            # (and graph.py) now handles state persistence and event emission.
+            # We just need to fetch the current state to pass to it.
             
-            # Store assistant response
-            if isinstance(state, dict):
-                new_msg = {
-                    "role": "assistant",
-                    "content": response,
-                    "timestamp": datetime.now().isoformat()
-                }
-                # Persist DELTA to DB (appended via reducer)
-                config_dict = {"configurable": {"thread_id": request.session_id}}
-                await wm.graph.aupdate_state(config_dict, {
-                    "conversation_history": [new_msg]
-                })
-                # Update local state
-                history = state.get('conversation_history', [])
-                history.append(new_msg)
-                state['conversation_history'] = history
+            config_dict = {"configurable": {"thread_id": request.session_id}}
+            snapshot = await wm.graph.aget_state(config_dict)
+            
+            if not snapshot or not snapshot.values:
+                # Fallback to cache if not in DB yet (unlikely for running session)
+                if request.session_id in sessions:
+                    state = sessions[request.session_id]
+                else: 
+                     # If session lost, we can't really chat. 
+                     # But we should log error.
+                     logger.error(f"Session {request.session_id} not found for chat")
+                     return
             else:
-                state.conversation_history.append({
-                    "role": "assistant", 
-                    "content": response,
-                    "timestamp": datetime.now().isoformat()
-                })
-            
-            if isinstance(state, dict):
-                logs = state.get('logs', [])
-                logs.append({
-                    "timestamp": datetime.now().isoformat(),
-                    "agent_type": "orchestrator",
-                    "message": f"Response: {response[:100]}{'...' if len(response) > 100 else ''}",
-                    "level": "info",
-                    "data": {}
-                })
-                # Persist to DB
-                config_dict = {"configurable": {"thread_id": request.session_id}}
-                await wm.graph.aupdate_state(config_dict, {
-                    "logs": logs
-                })
-                state['logs'] = logs
-            else:
-                state.add_log(
-                    AgentType.ORCHESTRATOR,
-                    f"Response: {response[:100]}{'...' if len(response) > 100 else ''}",
-                    level="info"
-                )
-            
-            sessions[request.session_id] = state
+                state = snapshot.values
+
+            await wm.handle_chat_message(request.session_id, request.message, state)
             
         except Exception as e:
+            logger.error(f"Error processing chat: {e}")
             # Persist error to DB
             config_dict = {"configurable": {"thread_id": request.session_id}}
             await wm.graph.aupdate_state(config_dict, {
                 "status": ExecutionStatus.ERROR,
                 "error_message": str(e)
             })
-            
-            if isinstance(sessions.get(request.session_id), dict):
-                sessions[request.session_id]['status'] = ExecutionStatus.ERROR
-                sessions[request.session_id]['error_message'] = str(e)
-            elif request.session_id in sessions:
-                sessions[request.session_id].status = ExecutionStatus.ERROR
-                sessions[request.session_id].error_message = str(e)
     
     background_tasks.add_task(process_chat)
     

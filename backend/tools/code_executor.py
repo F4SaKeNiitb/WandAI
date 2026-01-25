@@ -20,7 +20,7 @@ ALLOWED_MODULES = {
 
 # Restricted names that cannot be accessed
 RESTRICTED_NAMES = {
-    'open', 'exec', 'eval', 'compile', '__import__',
+    'open', 'exec', 'eval', 'compile', 
     'input', 'breakpoint', 'memoryview', 'vars',
 }
 
@@ -43,7 +43,8 @@ def create_safe_globals() -> dict:
         'str', 'sum', 'tuple', 'type', 'zip',
         # Exceptions
         'Exception', 'ValueError', 'TypeError', 'KeyError', 'IndexError',
-        'ImportError', 'AttributeError', 'NameError', 'SyntaxError', 'RuntimeError'
+        'ImportError', 'AttributeError', 'NameError', 'SyntaxError', 'RuntimeError',
+        '__import__'
     ]
     
     for name in allowed_builtins:

@@ -151,7 +151,13 @@ class BaseAgent(ABC):
                 # Self-correction: Include error in next attempt
                 if attempt < max_retries - 1:
                     logger.debug(f"   [{self.agent_type.value}] Retrying with self-correction...")
-                    task_description = f"{task_description}\n\nPrevious attempt failed with error: {error}\nPlease try a different approach."
+                    task_description = f"""{task_description}
+
+## ⚠️ PREVIOUS FAILED ATTEMPT
+The step failed with the following error:
+{error}
+
+Please analyze this error and adjust your approach to avoid repeating it."""
                     await self.emit_event("agent_retrying", state, {
                         "step_id": step_id,
                         "error": error

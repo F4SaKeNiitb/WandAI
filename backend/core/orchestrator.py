@@ -346,7 +346,7 @@ Respond in JSON format:
             else:
                 status = step.status.value if hasattr(step.status, 'value') else str(step.status)
                 
-            if str(status) == "pending":
+            if str(status) in ["pending", "retrying"]:
                 # Check if all dependencies are satisfied
                 if isinstance(step, dict):
                     dependencies = step.get('dependencies', [])

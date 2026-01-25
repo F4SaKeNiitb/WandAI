@@ -14,7 +14,11 @@ from agents.researcher import ResearcherAgent
 from agents.coder import CoderAgent
 from agents.analyst import AnalystAgent
 from agents.writer import WriterAgent
+from agents.writer import WriterAgent
 from config import config
+from core.logging import get_logger
+
+logger = get_logger('WORKFLOW')
 
 
 # Helper functions for dict-safe state access
@@ -301,10 +305,41 @@ class WorkflowManager:
         if all_completed and plan:
             return "aggregate"
         
-        if has_pending:
+        # Check if there are any EXECUTABLE steps (pending/retrying AND deps satisfied)
+        has_executable = False
+        
+        # Get set of completed steps for quick lookup
+        completed_ids = set()
+        for s in plan:
+            s_id = s.get('id') if isinstance(s, dict) else s.id
+            if isinstance(s, dict):
+                s_status = get_status_value(s.get('status', ''))
+            else:
+                s_status = get_status_value(s.status)
+            
+            if s_status == 'completed':
+                completed_ids.add(s_id)
+        
+        # Check each pending step for executable status
+        for s in plan:
+            if isinstance(s, dict):
+                s_status = get_status_value(s.get('status', ''))
+                deps = s.get('dependencies', [])
+            else:
+                s_status = get_status_value(s.status)
+                deps = s.dependencies
+            
+            if s_status in ['pending', 'retrying']:
+                # Are dependencies met?
+                deps_met = all(d in completed_ids for d in deps)
+                if deps_met:
+                    has_executable = True
+                    break
+        
+        if has_executable:
             return "continue"
         
-        # All failed or blocked
+        # All pending steps are blocked or no pending steps
         return "aggregate"
         
     def _route_after_aggregation(self, state: AgentState) -> str:
@@ -491,13 +526,25 @@ Please update the plan to address these pending requests."""
         - If a step has already run (completed/failed): reset it and all downstream steps,
           then re-execute from that point.
         """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.info(f"📝 [UPDATE_PLAN] Starting plan update for session {session_id[:8]}...")
+        logger.debug(f"📝 [UPDATE_PLAN] New plan has {len(new_plan)} steps")
+        
         config_dict = {"configurable": {"thread_id": session_id}}
         current_state = await self.graph.aget_state(config_dict)
         if current_state is None:
+            logger.error(f"📝 [UPDATE_PLAN] No session found: {session_id}")
             raise ValueError(f"No session found: {session_id}")
         
         state = current_state.values
+        current_status = state.get('status') if isinstance(state, dict) else getattr(state, 'status', None)
+        current_step_idx = state.get('current_step_index', 0) if isinstance(state, dict) else getattr(state, 'current_step_index', 0)
+        logger.info(f"📝 [UPDATE_PLAN] Current state: status={current_status}, step_index={current_step_idx}")
+        
         old_plan = state.get('plan', []) if isinstance(state, dict) else getattr(state, 'plan', [])
+        logger.debug(f"📝 [UPDATE_PLAN] Old plan has {len(old_plan)} steps")
         
         # Create a map of old steps by ID
         old_plan_map = {}
@@ -531,14 +578,21 @@ Please update the plan to address these pending requests."""
                 
                 # Check for meaningful change
                 if old_desc != new_desc or old_agent != new_agent:
+                    logger.info(f"📝 [UPDATE_PLAN] Step {i} ({step_id}) changed: status={old_status}")
+                    logger.debug(f"📝 [UPDATE_PLAN]   Old desc: {old_desc[:50]}...")
+                    logger.debug(f"📝 [UPDATE_PLAN]   New desc: {new_desc[:50]}...")
                     # Step was modified
                     if old_status in ['completed', 'failed']:
                         # Need to re-run from this step
                         if rerun_from_index == -1 or i < rerun_from_index:
                             rerun_from_index = i
+                            logger.info(f"📝 [UPDATE_PLAN] Will re-run from step {i} (was {old_status})")
+                else:
+                    logger.debug(f"📝 [UPDATE_PLAN] Step {i} ({step_id}) unchanged, status={old_status}")
         
         # Reset status for modified and downstream steps
         if rerun_from_index >= 0:
+            logger.info(f"📝 [UPDATE_PLAN] Resetting steps {rerun_from_index} to {len(new_plan)-1}")
             for j in range(rerun_from_index, len(new_plan)):
                 if isinstance(new_plan[j], dict):
                     new_plan[j]['status'] = 'pending'
@@ -559,19 +613,100 @@ Please update the plan to address these pending requests."""
                     "level": "info"
                 })
             
-            # Update state and re-invoke
+            # Update state with new plan and step index
+            logger.info(f"📝 [UPDATE_PLAN] Updating state: current_step_index={rerun_from_index}, status=EXECUTING")
             await self.graph.aupdate_state(config_dict, {
                 "plan": new_plan,
                 "current_step_index": rerun_from_index,
                 "status": ExecutionStatus.EXECUTING
             })
             
-            # Re-invoke graph from current state
-            updated_state = (await self.graph.aget_state(config_dict)).values
-            await self.graph.ainvoke(updated_state, config=config_dict)
+            # Directly execute the edited step and downstream steps (bypass orchestrator)
+            import asyncio
+            async def _execute_steps_directly():
+                logger.info(f"📝 [UPDATE_PLAN] Direct step execution starting...")
+                try:
+                    # Get the updated state
+                    current_state = await self.graph.aget_state(config_dict)
+                    state = current_state.values
+                    
+                    # Convert state to AgentState if needed
+                    if isinstance(state, dict):
+                        from core.state import AgentState
+                        state = AgentState(**state)
+                    
+                    # Execute steps from rerun_from_index onwards
+                    plan = state.plan
+                    for step_idx in range(rerun_from_index, len(plan)):
+                        step = plan[step_idx]
+                        step_id = step.id if hasattr(step, 'id') else step.get('id')
+                        agent_type = step.agent_type if hasattr(step, 'agent_type') else step.get('agent_type')
+                        description = step.description if hasattr(step, 'description') else step.get('description')
+                        
+                        logger.info(f"📝 [UPDATE_PLAN] Executing step {step_idx + 1}: {step_id} ({agent_type})")
+                        
+                        # Get the agent
+                        agent = self.agents.get(agent_type)
+                        if not agent:
+                            logger.error(f"📝 [UPDATE_PLAN] Unknown agent type: {agent_type}")
+                            state = await self.orchestrator.handle_step_result(
+                                state, step_id, False, error=f"Unknown agent type: {agent_type}"
+                            )
+                            continue
+                        
+                        # Execute the step
+                        success, result, error = await agent.execute_with_retry(
+                            state, step_id, description
+                        )
+                        
+                        # Update state with result
+                        state = await self.orchestrator.handle_step_result(
+                            state, step_id, success, result, error
+                        )
+                        
+                        # Update graph state after each step
+                        await self.graph.aupdate_state(config_dict, state.model_dump())
+                        
+                        # Send step completed event
+                        if self.event_callback:
+                            await self.event_callback(state.to_event("step_completed"))
+                        
+                        if not success:
+                            logger.error(f"📝 [UPDATE_PLAN] Step {step_id} failed: {error}")
+                            break
+                    
+                    # Aggregate results and complete
+                    logger.info(f"📝 [UPDATE_PLAN] All steps completed, aggregating results...")
+                    state = await self.orchestrator.aggregate_results(state)
+                    state.status = ExecutionStatus.COMPLETED
+                    
+                    # Save final state
+                    await self.graph.aupdate_state(config_dict, state.model_dump())
+                    
+                    # Send completion event
+                    if self.event_callback:
+                        await self.event_callback(state.to_event("execution_completed"))
+                    
+                    logger.info(f"📝 [UPDATE_PLAN] Direct step execution completed successfully")
+                    
+                except Exception as e:
+                    logger.error(f"📝 [UPDATE_PLAN] Direct step execution failed: {str(e)}")
+                    import traceback
+                    logger.error(f"📝 [UPDATE_PLAN] Traceback: {traceback.format_exc()}")
+                    if self.event_callback:
+                        await self.event_callback({
+                            "type": "error",
+                            "session_id": session_id,
+                            "message": f"Re-execution failed: {str(e)}"
+                        })
+            
+            asyncio.create_task(_execute_steps_directly())
+            logger.info(f"📝 [UPDATE_PLAN] Background task created, returning from update_plan")
         else:
             # Just update the plan, no re-run needed (pending steps updated in place)
+            logger.info(f"📝 [UPDATE_PLAN] No completed steps changed, just updating plan in place")
             await self.graph.aupdate_state(config_dict, {"plan": new_plan})
+            logger.info(f"📝 [UPDATE_PLAN] Plan updated successfully (no re-run needed)")
     
     # ============================================================
     # STRETCH GOALS: Live Conversation & Multi-turn Refinement
@@ -597,6 +732,7 @@ Please update the plan to address these pending requests."""
         Returns:
             Response message from the orchestrator
         """
+        logger.info(f"💬 [CHAT] Handling message for session {session_id}: {message[:50]}...")
         from core.llm import get_llm
         from langchain_core.prompts import ChatPromptTemplate
         
@@ -642,6 +778,16 @@ Please update the plan to address these pending requests."""
                 
             context_parts.append(f"Artifacts created: {', '.join(names)}")
             
+        # Add conversation history to context
+        conversation_history = get_state_attr(state, 'conversation_history', [])
+        if conversation_history:
+            context_parts.append("Conversation History:")
+            # Show last 10 messages
+            for msg in conversation_history[-10:]:
+                role = msg.get('role', 'unknown')
+                content = msg.get('content', '')
+                context_parts.append(f"  [{role.upper()}]: {content}")
+            
         context_str = "\n".join(context_parts)
         
         # Intent Classification Logic
@@ -676,6 +822,7 @@ Please update the plan to address these pending requests."""
                 "context": context_str,
                 "message": message
             })
+            logger.info(f"💬 [CHAT] Intent classification: {classification}")
             intent = classification.get("intent", "CHAT")
             refinement_query = classification.get("refinement_query")
         except Exception as e:
@@ -685,8 +832,19 @@ Please update the plan to address these pending requests."""
     
         # Handle Refinement
         if intent == "REFINE" and refinement_query:
+            # Add user message to history
+            user_msg = {"role": "user", "content": message, "type": "refinement"}
+            
             # Check if we can execute immediately (Completed/Error) or need to Queue (Running)
             if status_val in ['completed', 'error']:
+                ai_msg = {"role": "assistant", "content": f"Starting refinement: {refinement_query}", "type": "chat"}
+                
+                # Persist history
+                config_dict = {"configurable": {"thread_id": session_id}}
+                await self.graph.aupdate_state(config_dict, {
+                    "conversation_history": [user_msg, ai_msg]
+                })
+
                 # Emit event to notify frontend
                 if self.event_callback:
                     await self.event_callback({
@@ -714,9 +872,12 @@ Please update the plan to address these pending requests."""
                 current_pending = get_state_attr(state, 'pending_refinement') or ""
                 new_pending = f"{current_pending}\n{refinement_query}".strip()
                 
+                ai_msg = {"role": "assistant", "content": f"Queued refinement: {refinement_query}", "type": "chat"}
+                
                 config_dict = {"configurable": {"thread_id": session_id}}
                 await self.graph.aupdate_state(config_dict, {
-                    "pending_refinement": new_pending
+                    "pending_refinement": new_pending,
+                    "conversation_history": [user_msg, ai_msg]
                 })
                 
                 # Emit event
@@ -757,15 +918,31 @@ Current execution context:
                 "message": message
             })
             
+            logger.info(f"💬 [CHAT] Generated response type: {type(response)}")
+            response_text = response.content if hasattr(response, 'content') else str(response)
+            logger.info(f"💬 [CHAT] Generated response text: {response_text[:50]}...")
+            
+            # Persist to state
+            user_msg = {"role": "user", "content": message, "type": "chat"}
+            ai_msg = {"role": "assistant", "content": response_text, "type": "chat"}
+            
+            config_dict = {"configurable": {"thread_id": session_id}}
+            await self.graph.aupdate_state(config_dict, {
+                "conversation_history": [user_msg, ai_msg]
+            })
+            
             # Emit event for the chat response matching frontend expectations
             if self.event_callback:
+                logger.info(f"💬 [CHAT] Emitting chat_response event")
                 await self.event_callback({
                     "type": "chat_response",
                     "session_id": session_id,
-                    "response": response.content
+                    "response": response_text
                 })
+            else:
+                logger.warning(f"💬 [CHAT] No event_callback configured")
             
-            return response.content
+            return response_text
             
         except Exception as e:
             error_msg = f"I encountered an error processing your message: {str(e)}"
@@ -823,7 +1000,7 @@ Conversation History (Context):
 {history_text if history_text else 'No prior conversation'}
 
 Available artifacts from previous execution:
-{', '.join(a.name for a in previous_artifacts.values()) if previous_artifacts else 'None'}
+{', '.join((a.get('name', 'Unknown') if isinstance(a, dict) else a.name) for a in previous_artifacts.values()) if previous_artifacts else 'None'}
 
 User's refinement:
 {refinement}
@@ -831,32 +1008,50 @@ User's refinement:
 Please build upon the previous work to address the user's refinement request.
 Reuse existing artifacts where possible."""
 
-        # Update state for refinement
-        set_state_attr(state, 'user_request', refined_request)
-        set_state_attr(state, 'status', ExecutionStatus.PLANNING)
-        set_state_attr(state, 'plan', [])
-        set_state_attr(state, 'current_step_index', 0)
-        set_state_attr(state, 'final_response', None)
-        set_state_attr(state, 'error_message', None)
+        # Prepare updates dictionary instead of modifying state directly
+        # This avoids issues with reducer fields (like conversation_history) being duplicated
+        # if we passed the full state object back to ainvoke.
+        updates = {}
+        
+        updates['user_request'] = refined_request
+        updates['status'] = ExecutionStatus.PLANNING
+        updates['plan'] = []
+        updates['current_step_index'] = 0
+        updates['final_response'] = None
+        updates['error_message'] = None
         
         # Keep existing artifacts if requested
         if previous_artifacts:
-            set_state_attr(state, 'artifacts', previous_artifacts)
+            updates['artifacts'] = previous_artifacts
         
-        if isinstance(state, dict):
-            if 'logs' not in state: state['logs'] = []
-            state['logs'].append({
-                "timestamp": datetime.now().isoformat(),
-                "agent_type": "orchestrator",
-                "message": f"Starting refinement: {refinement[:100]}...",
-                "level": "info",
-                "data": {}
-            })
-        else:
-            state.add_log(
-                AgentType.ORCHESTRATOR,
-                f"Starting refinement: {refinement[:100]}..."
-            )
+        # Add log entry
+        new_log = {
+            "timestamp": datetime.now().isoformat(),
+            "agent_type": "orchestrator",
+            "message": f"Starting refinement: {refinement[:100]}...",
+            "level": "info",
+            "data": {}
+        }
+        
+        # For logs (which likely overwrite or append depending on config), 
+        # we generally want to append. But if we pass a list, it might replace?
+        # Safe strategy: Get existing logs and append? 
+        # Or better: if logs field is not annotated with add, it replaces.
+        # But we want to KEEP history.
+        # Let's assume standard behavior: we should pass the FULL updated list for non-reduced fields.
+        previous_logs = get_state_attr(state, 'logs', [])
+        # Convert Pydantic models to dicts if needed
+        previous_logs_dicts = []
+        for log in previous_logs:
+            if hasattr(log, 'model_dump'):
+                previous_logs_dicts.append(log.model_dump())
+            elif isinstance(log, dict):
+                previous_logs_dicts.append(log)
+            else:
+                 # fallback
+                 previous_logs_dicts.append(log)
+                 
+        updates['logs'] = previous_logs_dicts + [new_log]
         
         # Emit event
         if self.event_callback:
@@ -870,7 +1065,9 @@ Reuse existing artifacts where possible."""
         config_dict = {"configurable": {"thread_id": session_id}}
         
         try:
-            final_state = await self.graph.ainvoke(state, config=config_dict)
+            # We pass ONLY the updates to ainvoke. 
+            # LangGraph merging logic will handle merging these into the thread state.
+            final_state = await self.graph.ainvoke(updates, config=config_dict)
             
             # Emit completion event
             if self.event_callback:
@@ -882,7 +1079,11 @@ Reuse existing artifacts where possible."""
             return final_state
             
         except Exception as e:
-            set_state_attr(state, 'status', ExecutionStatus.ERROR)
-            set_state_attr(state, 'error_message', f"Refinement failed: {str(e)}")
+            # Handle error by updating state
+            error_updates = {
+                "status": ExecutionStatus.ERROR,
+                "error_message": f"Refinement failed: {str(e)}"
+            }
+            await self.graph.aupdate_state(config_dict, error_updates)
             return state
 

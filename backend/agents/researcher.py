@@ -67,13 +67,16 @@ Respond in JSON format:
 }}
 
 Generate 1-3 focused search queries."""),
-            ("user", f"Research task: {task_description}\n\nContext: {context}")
+            ("user", "Research task: {task}\n\nContext: {context}")
         ])
         
         try:
             # Plan the searches
             planning_chain = planning_prompt | self.llm | JsonOutputParser()
-            plan = await planning_chain.ainvoke({})
+            plan = await planning_chain.ainvoke({
+                "task": task_description,
+                "context": context
+            })
             queries = plan.get("queries", [task_description])
             
             state.add_log(

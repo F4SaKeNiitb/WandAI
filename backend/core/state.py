@@ -201,6 +201,7 @@ class AgentState(BaseModel):
             "plan": [step.model_dump() for step in self.plan],
             "latest_log": self.logs[-1].model_dump() if self.logs else None,
             "artifacts_count": len(self.artifacts),
+            "conversation_history": self.conversation_history,
             "timestamp": datetime.now().isoformat()
         }
 
