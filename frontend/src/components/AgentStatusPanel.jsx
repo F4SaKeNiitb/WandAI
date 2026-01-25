@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import ReactFlow, {
     Background,
     useNodesState,
@@ -66,64 +66,139 @@ function getAgentStatus(agentType, plan) {
     return 'pending';
 }
 
-export function AgentStatusPanel({ plan, currentStep, logs }) {
+export function AgentStatusPanel({ plan, currentStep, logs, toolActivity }) {
     const [nodes, setNodes, onNodesChange] = useNodesState(INITIAL_NODES);
     const [edges, setEdges, onEdgesChange] = useEdgesState(INITIAL_EDGES);
+    const [agentsList, setAgentsList] = useState([]);
 
-    // Update node data when plan/logs change, without resetting position
+    // Poll for agents list (independent of plan updates)
     useEffect(() => {
-        setNodes((nds) =>
-            nds.map((node) => {
+        const fetchAgents = async () => {
+            try {
+                const res = await fetch('/api/agents');
+                const data = await res.json();
+                setAgentsList(data);
+            } catch (e) {
+                console.error("Failed to fetch agents:", e);
+            }
+        };
+
+        fetchAgents();
+        const interval = setInterval(fetchAgents, 5000);
+        return () => clearInterval(interval);
+    }, []);
+
+    const handleDeleteAgent = async (agentId) => {
+        if (!agentId) return;
+        try {
+            const res = await fetch(`/api/agents/${agentId}`, { method: 'DELETE' });
+            if (res.ok) {
+                // Refresh list immediately
+                const resList = await fetch('/api/agents');
+                const data = await resList.json();
+                setAgentsList(data);
+            } else {
+                console.error("Failed to delete agent");
+            }
+        } catch (e) {
+            console.error("Error deleting agent:", e);
+        }
+    };
+
+    // Rebuild nodes when agentsList or plan/status changes
+    useEffect(() => {
+        if (agentsList.length === 0) return;
+
+        // Merge with existing config or create new positions
+        let newNodes = [];
+
+        // Always add Orchestrator first
+        const orch = agentsList.find(a => a.id === 'orchestrator');
+        if (orch) {
+            newNodes.push({
+                id: 'orchestrator',
+                type: 'agentNode',
+                position: AGENT_CONFIG.orchestrator.position,
+                data: {
+                    label: 'Orchestrator',
+                    status: getAgentStatus('orchestrator', plan),
+                    agent_type: 'orchestrator',
+                    description: 'Idle',
+                    isCustom: false
+                }
+            });
+        }
+
+        // Process other agents
+        const otherAgents = agentsList.filter(a => a.id !== 'orchestrator');
+        otherAgents.forEach((agent, index) => {
+            let position;
+            if (AGENT_CONFIG[agent.id]) {
+                position = AGENT_CONFIG[agent.id].position;
+            } else {
+                position = { x: (index % 5) * 300, y: 250 + (Math.floor(index / 5) * 150) };
+            }
+
+            const lastLog = logs?.filter(l => l.agent_type === agent.id).pop();
+            const activeTool = toolActivity && toolActivity.agent === agent.id ? toolActivity : null;
+            const status = getAgentStatus(agent.id, plan);
+
+            let description = 'Idle';
+            if (activeTool) {
+                description = activeTool.tool === 'web_search_api'
+                    ? `🔎 "${activeTool.query}"`
+                    : `🔧 Using ${activeTool.tool}`;
+            } else if (lastLog) {
+                description = lastLog.message;
+            } else if (status === 'in_progress') {
+                description = 'Working...';
+            }
+
+            newNodes.push({
+                id: agent.id,
+                type: 'agentNode',
+                position,
+                data: {
+                    label: agent.name,
+                    status: status,
+                    agent_type: agent.id,
+                    description: description,
+                    isCustom: agent.type === 'custom',
+                    onDelete: handleDeleteAgent
+                }
+            });
+        });
+
+        // Use setNodes with a callback to preserve internal state if needed,
+        // but here we are restructuring the graph so replacing is safer to ensure correct nodes.
+        // To avoid resetting positions of dragged nodes, we should merge.
+        // But for now, simple replacement fixes the "not loading" / infinite loop issue.
+        setNodes(newNodes);
+
+        // Update edges
+        const newEdges = newNodes
+            .filter(n => n.id !== 'orchestrator')
+            .map(node => {
                 const status = getAgentStatus(node.id, plan);
-                const lastLog = logs?.filter(l => l.agent_type === node.id).pop();
-
-                return {
-                    ...node,
-                    data: {
-                        ...node.data,
-                        status: status,
-                        description: lastLog ? lastLog.message : (status === 'in_progress' ? 'Working...' : 'Idle')
-                    }
-                };
-            })
-        );
-    }, [plan, logs, setNodes]);
-
-    // Update edges based on status
-    useEffect(() => {
-        setEdges((eds) =>
-            eds.map((edge) => {
-                const targetId = edge.target;
-                const status = getAgentStatus(targetId, plan);
-                const isActive = status === 'in_progress';
                 const isCompleted = status === 'completed';
-
-                // Blue for active, Green for completed
-                // User Request: Lines should ALWAYS be glowing and animated
-                // We keep the color logic (Blue for active/pending, Green for completed) 
-                // but force animation and glow effects.
-
                 const activeColor = '#3b82f6';
                 const completedColor = '#10b981';
-                const inactiveColor = '#333';
-
-                // Determine color based on status, but default to active blue if pending/idle
-                // to ensure it looks "glowing" as requested.
-                let edgeColor = activeColor;
-                if (isCompleted) edgeColor = completedColor;
+                const edgeColor = isCompleted ? completedColor : activeColor;
 
                 return {
-                    ...edge,
+                    id: `orchestrator-${node.id}`,
+                    source: 'orchestrator',
+                    target: node.id,
                     type: 'animated',
-                    animated: true, // ALWAYS ANIMATED
+                    animated: true,
                     data: {
-                        isActive: true, // ALWAYS GLOWING
+                        isActive: true,
                         isCompleted
                     },
                     style: {
                         stroke: edgeColor,
-                        strokeWidth: 3, // Always thick
-                        filter: `drop-shadow(0 0 4px ${edgeColor})`, // Always glowing
+                        strokeWidth: 3,
+                        filter: `drop-shadow(0 0 4px ${edgeColor})`,
                         opacity: 1
                     },
                     markerEnd: {
@@ -131,9 +206,10 @@ export function AgentStatusPanel({ plan, currentStep, logs }) {
                         color: edgeColor,
                     },
                 };
-            })
-        );
-    }, [plan, setEdges]);
+            });
+        setEdges(newEdges);
+
+    }, [agentsList, plan, logs, toolActivity, setNodes, setEdges]);
 
     return (
         <div className="agent-panel" style={{ height: '400px', background: '#0a0a0a', borderRadius: '12px', border: '1px solid #333', display: 'flex', flexDirection: 'column' }}>

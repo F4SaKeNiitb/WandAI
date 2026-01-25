@@ -26,8 +26,8 @@ export function AnimatedEdge({
         targetPosition,
     });
 
-    const isActive = data?.isActive;
-    const isCompleted = data?.isCompleted;
+    const isActive = data?.isActive || false;
+    const isCompleted = data?.isCompleted || false;
 
     // Colors for active and completed states
     const activeColor = '#3b82f6';  // Blue

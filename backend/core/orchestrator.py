@@ -210,55 +210,76 @@ Respond in JSON format:
                 f"- {c}" for c in user_clarifications
             )
         
+        # Load custom agents
+        import json
+        import os
+        custom_agents_str = ""
+        if os.path.exists("custom_agents.json"):
+            try:
+                with open("custom_agents.json", "r") as f:
+                    custom_agents = json.load(f)
+                    for ca in custom_agents:
+                        custom_agents_str += f"- {ca['name']}: {ca['system_prompt'][:100]}...\n"
+            except Exception as e:
+                logger.error(f"Failed to load custom agents for planning: {e}")
+
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """You are a task planner for a multi-agent AI system. Your job is to decompose a business request into atomic, executable steps.
+            ("system", f"""You are a task planner for a multi-agent AI system. Your job is to decompose a business request into atomic, executable steps.
 
 Available agents:
 - researcher: Web searches, data retrieval from external sources
 - coder: Python code execution, calculations, data processing
 - analyst: Data analysis, chart generation, statistical analysis
 - writer: Text summarization, formatting, report generation
+{{custom_agents}}
 
 Rules:
-1. Each step should be atomic and executable by a single agent
-2. Order steps logically - data gathering before analysis, analysis before summarization
-3. Specify clear dependencies between steps
-4. Be specific about what each step should produce
+1. Break down the request into at least 3-5 granular steps. Avoid single-step plans.
+2. Each step should be atomic and executable by a single agent
+3. Order steps logically - data gathering before analysis, analysis before summarization
+4. Encourage multi-agent collaboration (e.g., researcher finds data -> analyst processes it -> writer summarizes).
+5. Specify clear dependencies between steps
+6. Be specific about what each step should produce
+7. IMPORTANT: Custom Agents vs Built-in Agents:
+   - Use custom agents (e.g., 'poet') ONLY when the step specifically requires their unique persona or expertise.
+   - Use 'researcher' for ALL data gathering, fact-checking, and history retrieval steps, even if the final goal is creative.
+   - Use 'writer' for general summarization or report writing.
+   - Example: For "Research coffee history and write a poem", use Researcher for history -> Poet for poem. Do NOT use Poet for research.
 
 Respond in JSON format:
-{{
+{{{{
     "plan": [
-        {{
+        {{{{
             "id": "<unique short id>",
             "description": "<clear description of what to do>",
-            "agent_type": "<researcher|coder|analyst|writer>",
+            "agent_type": "<researcher|coder|analyst|writer|custom_agent_id>",
             "dependencies": [<list of step IDs this depends on>]
-        }}
+        }}}}
     ],
     "reasoning": "<brief explanation of the plan>"
-}}"""),
+}}}}"""),
             ("user", "Create a plan for this request: {context}")
         ])
         
         chain = prompt | self.llm | JsonOutputParser()
         
         try:
-            result = await chain.ainvoke({"context": context})
+            result = await chain.ainvoke({
+                "context": context, 
+                "custom_agents": custom_agents_str
+            })
             
             # Convert to PlanStep objects (or dicts)
             new_plan = []
             for step_data in result.get("plan", []):
-                # Ensure agent_type is valid
+                # Ensure agent_type is valid - allow custom agents (strings)
                 a_type = step_data.get("agent_type", "researcher")
-                try:
-                    AgentType(a_type)
-                except ValueError:
-                    a_type = "researcher"
+                # Removed strict AgentType enum validation to allow custom agents
                 
                 step = PlanStep(
                     id=step_data.get("id", f"step_{len(new_plan)+1}"),
                     description=step_data.get("description", ""),
-                    agent_type=AgentType(a_type),
+                    agent_type=a_type,
                     dependencies=step_data.get("dependencies", [])
                 )
                 
@@ -358,20 +379,43 @@ Respond in JSON format:
                 if deps_satisfied:
                     # Update status to in_progress
                     if isinstance(step, dict):
-                        step['status'] = StepStatus.IN_PROGRESS.value
-                        agent_type_str = step.get('agent_type', 'researcher')
-                        if hasattr(agent_type_str, 'value'): agent_type_str = agent_type_str.value
                         try:
-                            agent_type = AgentType(agent_type_str)
-                        except:
-                            agent_type = AgentType.RESEARCHER
-                        
-                        # Convert dict step to PlanStep object for return
-                        step_obj = PlanStep(**step)
-                        return agent_type, step_obj
+                            step['status'] = StepStatus.IN_PROGRESS.value
+                            agent_type_str = step.get('agent_type', 'researcher')
+                            
+                            # DEBUG LOGGING FOR POET CRASH
+                            logger.info(f"🔎 [ROUTE_DEBUG] Processing step agent: {agent_type_str} type: {type(agent_type_str)}")
+                            
+                            # Check if it has value attribute (Enum) or use str directly
+                            if hasattr(agent_type_str, 'value'): 
+                                agent_type_str = agent_type_str.value
+                            
+                            # Allow custom agents (strings)
+                            agent_type = str(agent_type_str)
+                            
+                            logger.info(f"🔎 [ROUTE_DEBUG] Resolved agent_type: {agent_type}")
+                            
+                            # Convert dict step to PlanStep object for return
+                            step_obj = PlanStep(**step)
+                            return agent_type, step_obj
+                        except Exception as e:
+                            logger.error(f"🔥 [ROUTE_CRASH] Error in route_to_agent dict handling: {e}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+                            raise e
                     else:
-                        step.status = StepStatus.IN_PROGRESS
-                        return step.agent_type, step
+                        try:
+                            logger.info(f"🔎 [ROUTE_DEBUG] Processing step obj agent: {step.agent_type} type: {type(step.agent_type)}")
+                            step.status = StepStatus.IN_PROGRESS
+                            # CRITICAL: Ensure we return string, not Enum, just in case
+                            a_type = step.agent_type
+                            if hasattr(a_type, 'value'): a_type = a_type.value
+                            return str(a_type), step
+                        except Exception as e:
+                            logger.error(f"🔥 [ROUTE_CRASH] Error in route_to_agent object handling: {e}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+                            raise e
         
         return None, None
     

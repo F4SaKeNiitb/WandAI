@@ -9,8 +9,9 @@ import ReactFlow, {
 import 'reactflow/dist/style.css';
 import { nodeTypes } from './FlowNodes';
 import { StepDetailModal } from './StepDetailModal';
+import { CreateAgentModal } from './CreateAgentModal';
 import dagre from 'dagre';
-import { Edit2, Save, X, Loader2, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
+import { Edit2, Save, X, Loader2, CheckCircle2, XCircle, AlertTriangle, Search, Code2, LineChart, PenTool, BrainCircuit, Bot, Plus, Trash2 } from 'lucide-react';
 
 const dagreGraph = new dagre.graphlib.Graph();
 dagreGraph.setDefaultEdgeLabel(() => ({}));
@@ -43,23 +44,73 @@ const getLayoutedElements = (nodes, edges) => {
     return { nodes: layoutedNodes, edges };
 };
 
-export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable }) {
+const AGENT_ICONS = {
+    orchestrator: <BrainCircuit size={14} />,
+    researcher: <Search size={14} />,
+    coder: <Code2 size={14} />,
+    analyst: <LineChart size={14} />,
+    writer: <PenTool size={14} />,
+};
+
+export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable, logs, artifacts, apiBaseUrl }) {
     const [nodes, setNodes, onNodesChange] = useNodesState([]);
     const [edges, setEdges, onEdgesState] = useEdgesState([]);
     const [selectedStep, setSelectedStep] = useState(null);
     const [isEditing, setIsEditing] = useState(false);
     const [editedPlan, setEditedPlan] = useState([]);
+    const [availableAgents, setAvailableAgents] = useState([]);
+    const [showCreateAgentModal, setShowCreateAgentModal] = useState(false);
 
-    // Sync edited plan when entering edit mode
+    // Fetch available agents on load
     useEffect(() => {
-        if (isEditing && plan) {
-            setEditedPlan(JSON.parse(JSON.stringify(plan)));
+        const url = apiBaseUrl ? `${apiBaseUrl}/api/agents` : '/api/agents';
+        fetch(url)
+            .then(res => res.json())
+            .then(data => setAvailableAgents(data))
+            .catch(err => console.error("Failed to load agents:", err));
+    }, [apiBaseUrl]);
+
+    // Sync edited plan when entering edit mode, and ensure agents are loaded
+    useEffect(() => {
+        if (isEditing) {
+            if (plan) {
+                setEditedPlan(JSON.parse(JSON.stringify(plan)));
+            }
+            // Refetch agents to ensure we have the latest list (e.g. if new custom agent was just added)
+            const url = apiBaseUrl ? `${apiBaseUrl}/api/agents` : '/api/agents';
+            fetch(url)
+                .then(res => res.json())
+                .then(data => {
+                    console.log("Loaded agents for editor:", data);
+                    setAvailableAgents(data);
+                })
+                .catch(err => console.error("Failed to load agents:", err));
         }
-    }, [isEditing]);
+    }, [isEditing, plan, apiBaseUrl]);
 
     const handlePlanChange = (index, field, value) => {
         const newPlan = [...editedPlan];
         newPlan[index][field] = value;
+        setEditedPlan(newPlan);
+    };
+
+    const handleAddStep = (index) => {
+        const newStep = {
+            id: 'step-' + Math.random().toString(36).substr(2, 9),
+            description: 'New Step',
+            agent_type: 'researcher',
+            status: 'pending',
+            dependencies: []
+        };
+        const newPlan = [...editedPlan];
+        newPlan.splice(index, 0, newStep);
+        setEditedPlan(newPlan);
+    };
+
+    const handleDeleteStep = (index) => {
+        if (editedPlan.length <= 1) return;
+        const newPlan = [...editedPlan];
+        newPlan.splice(index, 1);
         setEditedPlan(newPlan);
     };
 
@@ -153,13 +204,11 @@ export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable }) {
     }, [plan, setNodes, setEdges]); // Rerun when plan updates
 
     return (
-        <div className="plan-viewer" style={{ height: '500px', background: '#0a0a0a', borderRadius: '12px', border: '1px solid #333' }}>
+        <div className="plan-viewer glass-panel" style={{ height: '500px', borderRadius: '12px', overflow: 'hidden' }}>
             <div style={{
                 padding: '16px',
-                borderBottom: '1px solid #222',
-                background: '#111',
-                borderTopLeftRadius: '12px',
-                borderTopRightRadius: '12px',
+                borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
+                background: 'rgba(0, 0, 0, 0.2)',
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center'
@@ -173,15 +222,18 @@ export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable }) {
                             style={{
                                 padding: '4px 8px',
                                 fontSize: '0.75rem',
-                                background: '#333',
+                                background: 'rgba(255, 255, 255, 0.1)',
                                 color: '#efefef',
                                 borderRadius: '4px',
-                                border: 'none',
+                                border: '1px solid rgba(255, 255, 255, 0.1)',
                                 cursor: 'pointer',
                                 display: 'flex',
                                 alignItems: 'center',
-                                gap: '4px'
+                                gap: '4px',
+                                transition: 'all 0.2s'
                             }}
+                            onMouseEnter={(e) => e.target.style.background = 'rgba(255, 255, 255, 0.2)'}
+                            onMouseLeave={(e) => e.target.style.background = 'rgba(255, 255, 255, 0.1)'}
                         >
                             <Edit2 size={12} /> Edit
                         </button>
@@ -244,10 +296,10 @@ export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable }) {
                                     display: 'flex',
                                     gap: '8px',
                                     marginBottom: '12px',
-                                    padding: '8px',
-                                    background: '#1a1a1a',
-                                    borderRadius: '6px',
-                                    border: `1px solid ${isCompleted ? '#10b981' : isFailed ? '#ef4444' : isInProgress ? '#3b82f6' : '#333'}`,
+                                    padding: '12px',
+                                    background: 'rgba(255, 255, 255, 0.03)',
+                                    borderRadius: '8px',
+                                    border: `1px solid ${isCompleted ? '#10b981' : isFailed ? '#ef4444' : isInProgress ? '#3b82f6' : 'rgba(255, 255, 255, 0.1)'}`,
                                     alignItems: 'center'
                                 }}>
                                     <span style={{
@@ -264,41 +316,94 @@ export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable }) {
                                                     `${index + 1}.`}
                                     </span>
                                     <div style={{ flex: 1 }}>
-                                        <input
-                                            type="text"
-                                            value={step.description}
-                                            onChange={(e) => handlePlanChange(index, 'description', e.target.value)}
-                                            style={{
-                                                width: '100%',
-                                                padding: '6px',
-                                                border: '1px solid #333',
-                                                background: '#222',
-                                                color: '#efefef',
-                                                borderRadius: '4px',
-                                                marginBottom: '4px'
-                                            }}
-                                        />
-                                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                                            <select
-                                                value={step.agent_type}
-                                                onChange={(e) => handlePlanChange(index, 'agent_type', e.target.value)}
+                                        <div style={{ display: 'flex', gap: '8px' }}>
+                                            <input
+                                                type="text"
+                                                value={step.description}
+                                                onChange={(e) => handlePlanChange(index, 'description', e.target.value)}
                                                 style={{
-                                                    padding: '4px',
-                                                    border: '1px solid #333',
-                                                    background: '#222',
+                                                    flex: 1,
+                                                    padding: '8px',
+                                                    border: '1px solid rgba(255, 255, 255, 0.1)',
+                                                    background: 'rgba(0, 0, 0, 0.3)',
                                                     color: '#efefef',
                                                     borderRadius: '4px',
-                                                    fontSize: '0.875rem'
+                                                    marginBottom: '8px',
+                                                    fontSize: '0.9rem'
                                                 }}
-                                            >
-                                                <option value="researcher">Researcher</option>
-                                                <option value="coder">Coder</option>
-                                                <option value="analyst">Analyst</option>
-                                                <option value="writer">Writer</option>
-                                                <option value="orchestrator">Orchestrator</option>
-                                            </select>
+                                            />
+                                            {/* Action Buttons */}
+                                            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                                <button
+                                                    onClick={() => handleAddStep(index + 1)}
+                                                    title="Insert Step Below"
+                                                    style={{
+                                                        padding: '4px',
+                                                        background: 'rgba(255, 255, 255, 0.1)',
+                                                        border: 'none',
+                                                        borderRadius: '4px',
+                                                        cursor: 'pointer',
+                                                        color: '#10b981'
+                                                    }}
+                                                >
+                                                    <Plus size={14} />
+                                                </button>
+                                                <button
+                                                    onClick={() => handleDeleteStep(index)}
+                                                    title="Delete Step"
+                                                    disabled={plan.length <= 1}
+                                                    style={{
+                                                        padding: '4px',
+                                                        background: 'rgba(255, 255, 255, 0.1)',
+                                                        border: 'none',
+                                                        borderRadius: '4px',
+                                                        cursor: plan.length <= 1 ? 'not-allowed' : 'pointer',
+                                                        color: '#ef4444',
+                                                        opacity: plan.length <= 1 ? 0.5 : 1
+                                                    }}
+                                                >
+                                                    <Trash2 size={14} />
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                            <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                                                <div style={{ position: 'absolute', left: '8px', color: '#9ca3af', display: 'flex' }}>
+                                                    {AGENT_ICONS[step.agent_type] || <Bot size={14} />}
+                                                </div>
+                                                <select
+                                                    value={step.agent_type}
+                                                    onChange={(e) => {
+                                                        const newVal = e.target.value;
+                                                        if (newVal === '__create_new__') {
+                                                            setShowCreateAgentModal(true);
+                                                        } else {
+                                                            handlePlanChange(index, 'agent_type', newVal);
+                                                        }
+                                                    }}
+                                                    style={{
+                                                        padding: '4px 8px 4px 28px',
+                                                        border: '1px solid rgba(255, 255, 255, 0.1)',
+                                                        background: 'rgba(0, 0, 0, 0.3)',
+                                                        color: '#efefef',
+                                                        borderRadius: '4px',
+                                                        fontSize: '0.875rem',
+                                                        appearance: 'none',
+                                                        cursor: 'pointer',
+                                                        maxWidth: '150px'
+                                                    }}
+                                                >
+                                                    {availableAgents.map(agent => (
+                                                        <option key={agent.id} value={agent.id}>
+                                                            {agent.name} {agent.type === 'custom' ? '(Custom)' : ''}
+                                                        </option>
+                                                    ))}
+                                                    <option disabled>──────────</option>
+                                                    <option value="__create_new__" style={{ fontStyle: 'italic', color: '#10b981' }}>+ Create New Agent...</option>
+                                                </select>
+                                            </div>
                                             {isCompleted && (
-                                                <span style={{ fontSize: '0.7rem', color: '#f59e0b', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                <span style={{ fontSize: '0.75rem', color: '#f59e0b', display: 'flex', alignItems: 'center', gap: '4px' }}>
                                                     <AlertTriangle size={12} /> Editing will re-run this & downstream steps
                                                 </span>
                                             )}
@@ -331,12 +436,36 @@ export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable }) {
                 )}
             </div>
 
-            {selectedStep && (
-                <StepDetailModal
-                    step={selectedStep}
-                    onClose={() => setSelectedStep(null)}
-                />
-            )}
-        </div>
+            {
+                selectedStep && (
+                    <StepDetailModal
+                        step={selectedStep}
+                        logs={logs}
+                        artifacts={artifacts}
+                        onClose={() => setSelectedStep(null)}
+                    />
+                )
+            }
+            {
+                showCreateAgentModal && (
+                    <CreateAgentModal
+                        onClose={() => setShowCreateAgentModal(false)}
+                        onSave={(newAgentId) => {
+                            // Refresh agents list
+                            const url = apiBaseUrl ? `${apiBaseUrl}/api/agents` : '/api/agents';
+                            fetch(url)
+                                .then(res => res.json())
+                                .then(data => setAvailableAgents(data))
+                                .catch(err => console.error("Failed to load agents:", err));
+
+                            // Select the new agent (if we knew which index... actually user just created it, 
+                            // they can now select it from dropdown.
+                            // To be smoother, we might want to pass the active index to this modal 
+                            // but for now refresing list is enough)
+                        }}
+                    />
+                )
+            }
+        </div >
     );
 }

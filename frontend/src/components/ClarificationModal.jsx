@@ -22,7 +22,7 @@ export function ClarificationModal({ questions, onSubmit, onCancel }) {
         <div className="modal-overlay" onClick={onCancel}>
             <div className="modal" onClick={e => e.stopPropagation()}>
                 <div className="modal-header">
-                    <h3>❓ Clarification Needed</h3>
+                    <h3>Clarification Needed</h3>
                 </div>
                 <div className="modal-body">
                     <p style={{

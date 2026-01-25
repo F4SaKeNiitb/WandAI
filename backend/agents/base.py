@@ -38,14 +38,15 @@ class BaseAgent(ABC):
         self.llm = get_llm()
         self.event_callback = event_callback
         self.tools: list[BaseTool] = []
-        logger.debug(f"Initialized {self.agent_type.value} agent")
+        agent_val = self.agent_type.value if hasattr(self.agent_type, 'value') else str(self.agent_type)
+        logger.debug(f"Initialized {agent_val} agent")
     
     async def emit_event(self, event_type: str, state: AgentState, extra: dict = None):
         """Emit a real-time event if callback is configured."""
         if self.event_callback:
             event = {
                 "type": event_type,
-                "agent_type": self.agent_type.value,
+                "agent_type": self.agent_type.value if hasattr(self.agent_type, 'value') else str(self.agent_type),
                 "session_id": state.session_id,
                 "timestamp": datetime.now().isoformat()
             }
@@ -101,11 +102,12 @@ class BaseAgent(ABC):
         max_retries = max_retries or config.agent.max_retries
         last_error = None
         
-        logger.info(f"🚀 [{self.agent_type.value}] Starting '{step_id}': {task_description[:80]}...")
+        agent_val = self.agent_type.value if hasattr(self.agent_type, 'value') else str(self.agent_type)
+        logger.info(f"🚀 [{agent_val}] Starting '{step_id}': {task_description[:80]}...")
         
         for attempt in range(max_retries):
             try:
-                logger.debug(f"   [{self.agent_type.value}] Attempt {attempt + 1}/{max_retries}")
+                logger.debug(f"   [{agent_val}] Attempt {attempt + 1}/{max_retries}")
                 
                 state.add_log(
                     self.agent_type,
@@ -124,7 +126,7 @@ class BaseAgent(ABC):
                 duration = (datetime.now() - start_time).total_seconds()
                 
                 if success:
-                    logger.info(f"✅ [{self.agent_type.value}] '{step_id}' completed ({duration:.2f}s)")
+                    logger.info(f"✅ [{agent_val}] '{step_id}' completed ({duration:.2f}s)")
                     if result:
                         logger.debug(f"   Result: {str(result)[:150]}...")
                     
@@ -139,7 +141,7 @@ class BaseAgent(ABC):
                     return True, result, None
                 
                 last_error = error
-                logger.warning(f"⚠️ [{self.agent_type.value}] '{step_id}' failed ({duration:.2f}s): {error}")
+                logger.warning(f"⚠️ [{agent_val}] '{step_id}' failed ({duration:.2f}s): {error}")
                 
                 state.add_log(
                     self.agent_type,
@@ -150,7 +152,7 @@ class BaseAgent(ABC):
                 
                 # Self-correction: Include error in next attempt
                 if attempt < max_retries - 1:
-                    logger.debug(f"   [{self.agent_type.value}] Retrying with self-correction...")
+                    logger.debug(f"   [{agent_val}] Retrying with self-correction...")
                     task_description = f"""{task_description}
 
 ## ⚠️ PREVIOUS FAILED ATTEMPT
@@ -165,7 +167,7 @@ Please analyze this error and adjust your approach to avoid repeating it."""
                 
             except Exception as e:
                 last_error = str(e)
-                logger.error(f"❌ [{self.agent_type.value}] '{step_id}' exception: {last_error}")
+                logger.error(f"❌ [{agent_val}] '{step_id}' exception: {last_error}")
                 state.add_log(
                     self.agent_type,
                     f"Unexpected error: {last_error}",
@@ -173,7 +175,7 @@ Please analyze this error and adjust your approach to avoid repeating it."""
                     step_id=step_id
                 )
         
-        logger.error(f"💥 [{self.agent_type.value}] '{step_id}' failed after {max_retries} attempts")
+        logger.error(f"💥 [{agent_val}] '{step_id}' failed after {max_retries} attempts")
         await self.emit_event("agent_failed", state, {
             "step_id": step_id,
             "error": last_error

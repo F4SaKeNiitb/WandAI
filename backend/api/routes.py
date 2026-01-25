@@ -290,6 +290,16 @@ async def get_session_status(session_id: str):
         else:
             raise HTTPException(status_code=404, detail="Session not found")
     
+    # DEBUG: Log history size to trace vanishing chat
+    ch_len = 0
+    if isinstance(state, dict):
+        ch_len = len(state.get('conversation_history', []))
+    else:
+        ch_len = len(state.conversation_history) if hasattr(state, 'conversation_history') else 0
+    
+    if ch_len == 0:
+        logger.warning(f"⚠️ [API] get_session_status returning EMPTY history for {session_id}. State type: {type(state)}")
+
     # Handle both dict (from LangGraph) and AgentState objects
     if isinstance(state, dict):
         status_val = state.get('status', 'pending')
@@ -407,6 +417,76 @@ async def get_artifact(session_id: str, artifact_id: str):
     
     artifact = state.artifacts[artifact_id]
     return artifact.model_dump()
+
+
+@router.get("/agents")
+async def list_agents():
+    """
+    List all available agents (builtin + custom).
+    """
+    wm = get_workflow_manager()
+    
+    # Builtin agents
+    agents = [
+        {"id": "orchestrator", "name": "Orchestrator", "type": "system"},
+        {"id": "researcher", "name": "Researcher", "type": "builtin"},
+        {"id": "coder", "name": "Coder", "type": "builtin"},
+        {"id": "analyst", "name": "Analyst", "type": "builtin"},
+        {"id": "writer", "name": "Writer", "type": "builtin"},
+    ]
+    
+    # Custom agents
+    import json
+    import os
+    if os.path.exists("custom_agents.json"):
+        try:
+            with open("custom_agents.json", "r") as f:
+                custom_agents = json.load(f)
+                for ca in custom_agents:
+                    agents.append({
+                        "id": ca["name"], 
+                        "name": ca["name"].replace("_", " ").title(),
+                        "type": "custom",
+                        "system_prompt": ca["system_prompt"]
+                    })
+        except Exception as e:
+            logger.error(f"Failed to list custom agents: {e}")
+            
+    return agents
+
+
+class CustomAgentRequest(BaseModel):
+    """Request body for creating a custom agent."""
+    name: str
+    system_prompt: str
+
+
+@router.post("/agents")
+async def create_custom_agent(request: CustomAgentRequest):
+    """
+    Create or update a custom agent.
+    """
+    wm = get_workflow_manager()
+    
+    success, message = wm.register_custom_agent(request.name, request.system_prompt)
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+        
+    return {"message": "Agent registered successfully", "id": request.name}
+
+
+@router.delete("/agents/{agent_id}")
+async def delete_custom_agent(agent_id: str):
+    """
+    Delete a custom agent.
+    """
+    wm = get_workflow_manager()
+    
+    success, message = wm.unregister_custom_agent(agent_id)
+    if not success:
+        raise HTTPException(status_code=400, detail=message)
+        
+    return {"message": "Agent deleted successfully", "id": agent_id}
 
 @router.post("/plan", response_model=ExecuteResponse)
 async def update_plan_midway(

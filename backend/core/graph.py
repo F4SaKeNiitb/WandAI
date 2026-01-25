@@ -65,6 +65,142 @@ class WorkflowManager:
             AgentType.WRITER: WriterAgent(event_callback),
         }
         
+        # Load custom agents
+        self._load_custom_agents()
+    
+    def _load_custom_agents(self):
+        """Load custom agents from storage."""
+        import json
+        import os
+        from agents.generic import GenericAgent
+        
+        try:
+            if os.path.exists("custom_agents.json"):
+                with open("custom_agents.json", "r") as f:
+                    custom_agents = json.load(f)
+                    for agent_data in custom_agents:
+                        name = agent_data.get("name")
+                        prompt = agent_data.get("system_prompt")
+                        if name and prompt:
+                            # Register the new agent
+                            self.agents[name] = GenericAgent(name, prompt, self.event_callback)
+                            logger.info(f"Registered custom agent: {name}")
+        except Exception as e:
+            logger.error(f"Failed to load custom agents: {e}")
+
+    def register_custom_agent(self, name: str, system_prompt: str):
+        """Register a new custom agent and save to storage."""
+        import json
+        import os
+        from agents.generic import GenericAgent
+        
+        # 1. Edge Case: Prevent overwriting built-in agents
+        reserved_names = {a.value if hasattr(a, 'value') else str(a) for a in AgentType}
+        if name.lower() in reserved_names:
+            logger.warning(f"Attempted to overwrite reserved agent: {name}")
+            return False, f"Cannot overwrite built-in agent '{name}'"
+
+        # Create and register
+        self.agents[name] = GenericAgent(name, system_prompt, self.event_callback)
+        
+        # Persist
+        try:
+            agents_list = []
+            if os.path.exists("custom_agents.json"):
+                with open("custom_agents.json", "r") as f:
+                    agents_list = json.load(f)
+            
+            # Update or add
+            existing = next((a for a in agents_list if a["name"] == name), None)
+            if existing:
+                existing["system_prompt"] = system_prompt
+            else:
+                agents_list.append({"name": name, "system_prompt": system_prompt})
+                
+            with open("custom_agents.json", "w") as f:
+                json.dump(agents_list, f, indent=2)
+                
+            logger.info(f"Persisted custom agent: {name}")
+            return True, "Agent registered successfully"
+        except Exception as e:
+            logger.error(f"Failed to persist custom agent: {e}")
+            return False, str(e)
+
+    def unregister_custom_agent(self, name: str):
+        """Unregister a custom agent and remove from storage."""
+        import json
+        import os
+        
+        # 1. Prevent deleting built-in agents
+        reserved_names = {a.value if hasattr(a, 'value') else str(a) for a in AgentType}
+        if name.lower() in reserved_names:
+            logger.warning(f"Attempted to delete reserved agent: {name}")
+            return False, f"Cannot delete built-in agent '{name}'"
+
+        # Remove from memory
+        if name in self.agents:
+            del self.agents[name]
+        
+        # Remove from storage
+        try:
+            if os.path.exists("custom_agents.json"):
+                with open("custom_agents.json", "r") as f:
+                    agents_list = json.load(f)
+                
+                initial_len = len(agents_list)
+                agents_list = [a for a in agents_list if a["name"] != name]
+                
+                if len(agents_list) < initial_len:
+                    with open("custom_agents.json", "w") as f:
+                        json.dump(agents_list, f, indent=2)
+                    logger.info(f"Deleted custom agent: {name}")
+                    return True, "Agent deleted successfully"
+                else:
+                    return False, "Agent not found in storage"
+            return False, "Storage file not found"
+        except Exception as e:
+            logger.error(f"Failed to delete custom agent: {e}")
+            return False, str(e)
+
+    async def update_plan(self, session_id: str, new_plan: list[dict]) -> None:
+        """
+        Update the plan mid-execution with intelligent partial re-execution.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.info(f"📝 [UPDATE_PLAN] Starting plan update for session {session_id[:8]}...")
+        
+        # 2. Edge Case: Clean up orphaned dependencies
+        # If a step was deleted, any other step depending on it will hang.
+        # We must remove invalid IDs from dependencies.
+        valid_ids = set()
+        for step in new_plan:
+             if isinstance(step, dict): valid_ids.add(step.get('id'))
+             else: valid_ids.add(step.id)
+             
+        for step in new_plan:
+            deps = step.get('dependencies', []) if isinstance(step, dict) else step.dependencies
+            # Filter out IDs that are no longer in the plan
+            clean_deps = [d for d in deps if d in valid_ids]
+            
+            if len(clean_deps) != len(deps):
+                logger.warning(f"📝 [UPDATE_PLAN] cleaned orphaned dependencies for step. Removed: {set(deps) - set(clean_deps)}")
+                
+            if isinstance(step, dict):
+                step['dependencies'] = clean_deps
+            else:
+                step.dependencies = clean_deps
+
+        config_dict = {"configurable": {"thread_id": session_id}}
+        current_state = await self.graph.aget_state(config_dict)
+        if current_state is None:
+            logger.error(f"📝 [UPDATE_PLAN] No session found: {session_id}")
+            raise ValueError(f"No session found: {session_id}")
+        
+        state = current_state.values
+        # ... rest of the function ...
+        
         # Resources to be initialized async
         self.conn = None
         self.memory = None
@@ -393,6 +529,31 @@ Please update the plan to address these pending requests."""
         
         config_dict = {"configurable": {"thread_id": initial_state.session_id}}
         
+        # NUCLEAR OPTION: Explicitly clear any existing state for this session
+        # This ensures conversation_history is reset even if session_id is reused.
+        try:
+            # Try standard LangGraph delete if available
+            if hasattr(self.memory, 'adelete'):
+                await self.memory.adelete(config_dict)
+            else:
+                # Manual SQLite cleanup since we have the connection
+                # This handles cases where operator.add would otherwise preserve old history
+                try:
+                    await self.conn.execute(
+                        "DELETE FROM checkpoints WHERE thread_id = ?", 
+                        (initial_state.session_id,)
+                    )
+                    await self.conn.execute(
+                        "DELETE FROM checkpoint_blobs WHERE thread_id = ?", 
+                        (initial_state.session_id,)
+                    )
+                    await self.conn.commit()
+                    logger.info(f"🧹 [EXECUTE] Cleared existing state for session {initial_state.session_id}")
+                except Exception as db_e:
+                    logger.warning(f"⚠️ [EXECUTE] Failed to clear DB state: {db_e}")
+        except Exception as e:
+            logger.warning(f"⚠️ [EXECUTE] Error clearing state: {e}")
+        
         # Run the graph
         final_state = await self.graph.ainvoke(initial_state, config=config_dict)
         
@@ -557,39 +718,49 @@ Please update the plan to address these pending requests."""
         rerun_from_index = -1
         
         # Detect which steps have changed
-        for i, new_step in enumerate(new_plan):
-            step_id = new_step.get('id') if isinstance(new_step, dict) else new_step.id
-            old_step = old_plan_map.get(step_id)
-            
-            if old_step:
-                # Get values from old step (handle dict or object)
-                if isinstance(old_step, dict):
-                    old_desc = old_step.get('description', '')
-                    old_agent = old_step.get('agent_type', '')
-                    old_status = old_step.get('status', 'pending')
-                else:
-                    old_desc = getattr(old_step, 'description', '')
-                    old_agent = getattr(old_step, 'agent_type', '')
-                    old_status = get_status_value(getattr(old_step, 'status', 'pending'))
-                
-                # Get values from new step
-                new_desc = new_step.get('description', '') if isinstance(new_step, dict) else new_step.description
-                new_agent = new_step.get('agent_type', '') if isinstance(new_step, dict) else new_step.agent_type
-                
-                # Check for meaningful change
-                if old_desc != new_desc or old_agent != new_agent:
-                    logger.info(f"📝 [UPDATE_PLAN] Step {i} ({step_id}) changed: status={old_status}")
-                    logger.debug(f"📝 [UPDATE_PLAN]   Old desc: {old_desc[:50]}...")
-                    logger.debug(f"📝 [UPDATE_PLAN]   New desc: {new_desc[:50]}...")
-                    # Step was modified
-                    if old_status in ['completed', 'failed']:
-                        # Need to re-run from this step
-                        if rerun_from_index == -1 or i < rerun_from_index:
-                            rerun_from_index = i
-                            logger.info(f"📝 [UPDATE_PLAN] Will re-run from step {i} (was {old_status})")
-                else:
-                    logger.debug(f"📝 [UPDATE_PLAN] Step {i} ({step_id}) unchanged, status={old_status}")
+        # We walk through both plans. The moment we see a divergence in ID, 
+        # it means a step was inserted or deleted (or completely changed).
+        # We must re-run from this index onwards.
         
+        max_len = max(len(vars(s) if not isinstance(s, dict) else s) for s in [old_plan]) # Dummy usage to keep simpler
+        max_idx = max(len(old_plan), len(new_plan))
+        
+        for i in range(max_idx):
+            # If we've gone past the length of either plan, we have a structure change
+            if i >= len(old_plan) or i >= len(new_plan):
+                if rerun_from_index == -1 or i < rerun_from_index:
+                    rerun_from_index = i
+                    logger.info(f"📝 [UPDATE_PLAN] Structure change at index {i} (Length mismatch)")
+                break
+                
+            old_step = old_plan[i]
+            new_step = new_plan[i]
+            
+            # Normalize to dicts/objects
+            old_id = old_step.get('id') if isinstance(old_step, dict) else old_step.id
+            new_id = new_step.get('id') if isinstance(new_step, dict) else new_step.id
+            
+            # Structural check: IDs must match
+            if old_id != new_id:
+                if rerun_from_index == -1 or i < rerun_from_index:
+                    rerun_from_index = i
+                    logger.info(f"📝 [UPDATE_PLAN] Structure change at index {i}: ID {old_id} != {new_id}")
+                break
+            
+            # Content check: If IDs match, check for description/agent changes
+            old_desc = old_step.get('description', '') if isinstance(old_step, dict) else getattr(old_step, 'description', '')
+            old_agent = old_step.get('agent_type', '') if isinstance(old_step, dict) else getattr(old_step, 'agent_type', '')
+            old_status = old_step.get('status', 'pending') if isinstance(old_step, dict) else get_status_value(getattr(old_step, 'status', 'pending'))
+
+            new_desc = new_step.get('description', '') if isinstance(new_step, dict) else new_step.description
+            new_agent = new_step.get('agent_type', '') if isinstance(new_step, dict) else new_step.agent_type
+
+            if old_desc != new_desc or old_agent != new_agent:
+                logger.info(f"📝 [UPDATE_PLAN] Step {i} ({old_id}) changed content")
+                if old_status in ['completed', 'failed']:
+                    if rerun_from_index == -1 or i < rerun_from_index:
+                        rerun_from_index = i
+                        
         # Reset status for modified and downstream steps
         if rerun_from_index >= 0:
             logger.info(f"📝 [UPDATE_PLAN] Resetting steps {rerun_from_index} to {len(new_plan)-1}")
@@ -620,6 +791,23 @@ Please update the plan to address these pending requests."""
                 "current_step_index": rerun_from_index,
                 "status": ExecutionStatus.EXECUTING
             })
+
+            # Emit plan update event immediately so frontend reflects changes
+            if self.event_callback:
+                try:
+                    # Fetch latest state to be sure
+                    latest = await self.graph.aget_state(config_dict)
+                    if latest and latest.values:
+                        val = latest.values
+                        # Handle dict vs object
+                        if isinstance(val, dict):
+                            from core.state import AgentState
+                            st = AgentState(**val)
+                        else:
+                            st = val
+                        await self.event_callback(st.to_event("plan_updated"))
+                except Exception as e:
+                     logger.error(f"Failed to emit plan_updated event: {e}")
             
             # Directly execute the edited step and downstream steps (bypass orchestrator)
             import asyncio
@@ -628,12 +816,24 @@ Please update the plan to address these pending requests."""
                 try:
                     # Get the updated state
                     current_state = await self.graph.aget_state(config_dict)
+                    if not current_state:
+                         logger.error("📝 [UPDATE_PLAN] Failed to get state for execution")
+                         return
+
                     state = current_state.values
                     
                     # Convert state to AgentState if needed
                     if isinstance(state, dict):
                         from core.state import AgentState
-                        state = AgentState(**state)
+                        # Handle potential extra fields by filtering or using construct
+                        # Best effort: use model_validate with strict=False or just **state if we trust it
+                        try:
+                            state = AgentState(**state)
+                        except Exception as e:
+                            logger.warning(f"📝 [UPDATE_PLAN] State conversion warning: {e}. Trying to filter fields.")
+                            valid_keys = AgentState.model_fields.keys()
+                            filtered_state = {k: v for k, v in state.items() if k in valid_keys}
+                            state = AgentState(**filtered_state)
                     
                     # Execute steps from rerun_from_index onwards
                     plan = state.plan

@@ -87,18 +87,54 @@ function processInline(text) {
     return <span dangerouslySetInnerHTML={{ __html: text }} />;
 }
 
-import { FileText, Bot, AlertTriangle } from 'lucide-react';
+import { FileText, Bot, AlertTriangle, Download } from 'lucide-react';
 
 export function ResultDisplay({ status, result, error, artifacts }) {
     const hasCharts = artifacts?.some(a => a.type === 'chart' || a.type === 'image');
 
+    const handleDownload = () => {
+        if (!result) return;
+        const blob = new Blob([result], { type: 'text/markdown' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `wandai-report-${new Date().toISOString().slice(0, 10)}.md`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    };
+
     return (
-        <div className="result-section">
+        <div className="result-section glass-panel">
             <div className="result-header">
                 <h3><span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}><FileText size={18} /> Result</span></h3>
-                <span className={`status-badge ${status}`}>
-                    {status?.replace('_', ' ') || 'pending'}
-                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    {result && (
+                        <button
+                            onClick={handleDownload}
+                            title="Download Report"
+                            style={{
+                                background: 'transparent',
+                                border: 'none',
+                                color: 'var(--color-text-secondary)',
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                padding: '4px',
+                                borderRadius: '4px',
+                                transition: 'color 0.2s'
+                            }}
+                            onMouseEnter={(e) => e.target.style.color = 'var(--color-text-primary)'}
+                            onMouseLeave={(e) => e.target.style.color = 'var(--color-text-secondary)'}
+                        >
+                            <Download size={16} />
+                        </button>
+                    )}
+                    <span className={`status-badge ${status}`}>
+                        {status?.replace('_', ' ') || 'pending'}
+                    </span>
+                </div>
             </div>
             <div className="result-content">
                 {!result && !error && status !== 'completed' && (

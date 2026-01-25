@@ -46,7 +46,7 @@ class PlanStep(BaseModel):
     """Individual step in the execution plan."""
     id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
     description: str
-    agent_type: AgentType
+    agent_type: str
     dependencies: list[str] = []  # IDs of steps this depends on
     status: StepStatus = StepStatus.PENDING
     result: Any = None
@@ -62,7 +62,7 @@ class PlanStep(BaseModel):
 class AgentLog(BaseModel):
     """Log entry from an agent's execution."""
     timestamp: datetime
-    agent_type: AgentType
+    agent_type: str
     step_id: str | None = None
     level: Literal["info", "warning", "error", "debug"] = "info"
     message: str
@@ -78,7 +78,7 @@ class Artifact(BaseModel):
     name: str
     type: Literal["text", "code", "chart", "data", "image"]
     content: Any
-    created_by: AgentType
+    created_by: str
     step_id: str
     created_at: datetime = field(default_factory=datetime.now)
     
@@ -138,7 +138,7 @@ class AgentState(BaseModel):
     
     def add_log(
         self,
-        agent_type: AgentType,
+        agent_type: str,
         message: str,
         level: str = "info",
         step_id: str | None = None,
@@ -160,7 +160,7 @@ class AgentState(BaseModel):
         name: str,
         artifact_type: str,
         content: Any,
-        created_by: AgentType,
+        created_by: str,
         step_id: str
     ) -> str:
         """Add an artifact and return its ID."""

@@ -51,6 +51,13 @@ async def lifespan(app: FastAPI):
     logger.info("✅ System initialized successfully")
     logger.info(f"📡 API: http://{config.app.host}:{config.app.port}")
     logger.info(f"📚 Docs: http://{config.app.host}:{config.app.port}/docs")
+
+    # Debug: Print all routes
+    for route in app.routes:
+        if hasattr(route, 'methods'):
+            logger.info(f"Route: {route.path} [{route.methods}]")
+        else:
+            logger.info(f"Route: {route.path} [WebSocket]")
     
     yield
     

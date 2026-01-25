@@ -1,3 +1,5 @@
+import { Terminal, BrainCircuit, Search, Code2, LineChart, PenTool, Bot } from 'lucide-react';
+
 function formatTime(timestamp) {
     if (!timestamp) return '';
     try {
@@ -14,19 +16,19 @@ function formatTime(timestamp) {
 }
 
 const AGENT_ICONS = {
-    orchestrator: 'ORCHESTRATOR',
-    researcher: 'RESEARCHER',
-    coder: 'CODER',
-    analyst: 'ANALYST',
-    writer: 'WRITER',
+    orchestrator: <BrainCircuit size={14} />,
+    researcher: <Search size={14} />,
+    coder: <Code2 size={14} />,
+    analyst: <LineChart size={14} />,
+    writer: <PenTool size={14} />,
 };
 
 export function LogsPanel({ logs }) {
     if (!logs || logs.length === 0) {
         return (
-            <div className="agent-panel">
+            <div className="agent-panel glass-panel">
                 <div className="panel-header">
-                    Activity Log
+                    <Terminal size={16} /> Activity Log
                 </div>
                 <div className="panel-content">
                     <div className="empty-state" style={{ padding: '2rem 1rem' }}>
@@ -41,9 +43,9 @@ export function LogsPanel({ logs }) {
     const recentLogs = [...logs].slice(-15).reverse();
 
     return (
-        <div className="agent-panel">
+        <div className="agent-panel glass-panel">
             <div className="panel-header">
-                Activity Log ({logs.length} events)
+                <Terminal size={16} /> Activity Log ({logs.length} events)
             </div>
             <div className="panel-content logs-panel">
                 {recentLogs.map((log, index) => (
@@ -55,7 +57,7 @@ export function LogsPanel({ logs }) {
                             {formatTime(log.timestamp)}
                         </span>
                         <span className="log-agent">
-                            {AGENT_ICONS[log.agent_type] || '🤖'}
+                            {AGENT_ICONS[log.agent_type] || <Bot size={14} />}
                         </span>
                         <span className="log-message">
                             {log.message}

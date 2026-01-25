@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Lightbulb } from 'lucide-react';
 
 export function ConversationMode({
     sessionId,
@@ -9,6 +10,26 @@ export function ConversationMode({
     onRefine
 }) {
     const [message, setMessage] = useState('');
+
+    // Add style for typing animation
+    const typingStyle = document.createElement('style');
+    typingStyle.innerHTML = `
+        @keyframes typing {
+            0%, 100% { opacity: 0.3; transform: translateY(0); }
+            50% { opacity: 1; transform: translateY(-2px); }
+        }
+        .typing-dot {
+            width: 4px;
+            height: 4px;
+            background: #9ca3af;
+            borderRadius: 50%;
+            animation: typing 1.4s infinite;
+        }
+    `;
+    if (!document.getElementById('typing-style')) {
+        typingStyle.id = 'typing-style';
+        document.head.appendChild(typingStyle);
+    }
 
     const isCompleted = status === 'completed';
     // Always allow chat if session is active
@@ -28,7 +49,7 @@ export function ConversationMode({
     };
 
     return (
-        <div className="agent-panel">
+        <div className="agent-panel glass-panel">
             <div className="panel-header">
                 Live Conversation
                 {isCompleted && (
@@ -62,7 +83,7 @@ export function ConversationMode({
                                     borderRadius: 'var(--radius-md)',
                                     background: entry.role === 'user'
                                         ? 'rgba(99, 102, 241, 0.1)'
-                                        : 'var(--color-bg-card)',
+                                        : 'rgba(255, 255, 255, 0.05)',
                                     fontSize: '0.875rem'
                                 }}
                             >
@@ -91,6 +112,25 @@ export function ConversationMode({
                         </div>
                     )}
                 </div>
+                {/* Thinking Bubble */}
+                {(status === 'planning' || status === 'executing') && (
+                    <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        marginBottom: '12px',
+                        padding: '8px 12px',
+                        borderRadius: '12px',
+                        background: 'rgba(255, 255, 255, 0.05)',
+                        width: 'fit-content',
+                        marginLeft: '0'
+                    }}>
+                        <div className="typing-dot" style={{ animationDelay: '0s' }}></div>
+                        <div className="typing-dot" style={{ animationDelay: '0.2s' }}></div>
+                        <div className="typing-dot" style={{ animationDelay: '0.4s' }}></div>
+                        <span style={{ fontSize: '0.75rem', color: '#9ca3af', marginLeft: '4px' }}>Thinking...</span>
+                    </div>
+                )}
 
                 {/* Input Area */}
                 {isActive && (
@@ -101,7 +141,9 @@ export function ConversationMode({
                             style={{
                                 minHeight: 'auto',
                                 padding: '0.5rem 0.75rem',
-                                flex: 1
+                                flex: 1,
+                                background: 'rgba(0, 0, 0, 0.2)',
+                                border: '1px solid rgba(255, 255, 255, 0.1)'
                             }}
                             placeholder={isCompleted
                                 ? 'Ask a question or request changes...'
@@ -125,9 +167,12 @@ export function ConversationMode({
                     <div style={{
                         fontSize: '0.7rem',
                         color: 'var(--color-text-muted)',
-                        marginTop: '0.5rem'
+                        marginTop: '0.5rem',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '4px'
                     }}>
-                        💡 Tip: You can ask to "refine the results", "add more info", or "change the style".
+                        <Lightbulb size={12} /> Tip: You can ask to "refine the results", "add more info", or "change the style".
                     </div>
                 )}
             </div>

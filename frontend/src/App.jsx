@@ -1,16 +1,17 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Wand2 } from 'lucide-react';
+import { Wand2, Bot } from 'lucide-react';
 import { useWebSocket } from './hooks/useWebSocket';
 import { RequestInput } from './components/RequestInput';
 import { AgentStatusPanel } from './components/AgentStatusPanel';
 import { PlanViewer } from './components/PlanViewer';
 import { ResultDisplay } from './components/ResultDisplay';
 import { ClarificationModal, ApprovalModal } from './components/ClarificationModal';
+import { CreateAgentModal } from './components/CreateAgentModal';
 import { LogsPanel } from './components/LogsPanel';
 import { ConversationMode } from './components/ConversationMode';
 
 // API basic configuration
-const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '');
 
 // API calls
 async function submitRequest(request) {
@@ -110,6 +111,7 @@ function App() {
     const [result, setResult] = useState(null);
     const [error, setError] = useState(null);
     const [artifacts, setArtifacts] = useState([]);
+    const [toolActivity, setToolActivity] = useState(null);
 
     // Conversation state
     const [conversationHistory, setConversationHistory] = useState([]); // Server state
@@ -118,6 +120,7 @@ function App() {
     // Modal states
     const [clarificationQuestions, setClarificationQuestions] = useState(null);
     const [showApprovalModal, setShowApprovalModal] = useState(false);
+    const [showCreateAgentModal, setShowCreateAgentModal] = useState(false);
     const [isSubmittingClarification, setIsSubmittingClarification] = useState(false);
 
     // Forward ref for handleRefine to avoid circular dependencies
@@ -125,19 +128,32 @@ function App() {
 
     // Helper to update history and remove matching pending messages
     const updateHistory = useCallback((newServerHistory) => {
-        setConversationHistory(newServerHistory);
+        // DEBUG: Trace why history vanishes
+        if (!newServerHistory || newServerHistory.length === 0) {
+            console.warn("⚠️ App: updateHistory received EMPTY history!", newServerHistory);
+
+            // PROTECTION: If we are actively running, don't wipe history based on a likely transient glitch
+            if (status === 'executing' || status === 'planning') {
+                console.log("🛡️ App: Ignoring empty history update while executing");
+                return;
+            }
+        } else {
+            console.log("✅ App: updateHistory received:", newServerHistory.length, "items");
+        }
+
+        setConversationHistory(newServerHistory || []);
 
         // Remove pending messages that are now in server history
         setPendingMessages(prev => prev.filter(pending => {
             // Check if this pending message is present in the new server history
             // We match by content and role
-            const existsInServer = newServerHistory.some(serverMsg =>
+            const existsInServer = (newServerHistory || []).some(serverMsg =>
                 serverMsg.role === pending.role &&
                 serverMsg.content === pending.content
             );
             return !existsInServer;
         }));
-    }, []);
+    }, [status]);
 
     // WebSocket message handler
     const handleWebSocketMessage = useCallback((data) => {
@@ -223,6 +239,26 @@ function App() {
             case 'step_failed':
             case 'agent_failed':
                 // Continue processing, the orchestrator will handle retries
+                break;
+
+            case 'searching':
+                // Handle tool usage events
+                setToolActivity({
+                    agent: data.agent_type,
+                    tool: data.tool,
+                    query: data.query,
+                    timestamp: Date.now()
+                });
+
+                // Clear after a delay to avoid stale state
+                setTimeout(() => {
+                    setToolActivity(prev => {
+                        if (prev && Date.now() - prev.timestamp > 4000) {
+                            return null;
+                        }
+                        return prev;
+                    });
+                }, 5000);
                 break;
 
             default:
@@ -364,9 +400,11 @@ function App() {
                 setStatus('executing');  // Reset status to show we're re-executing
             }
 
+            // Optimistically update the plan to prevent UI flicker/reversion
+            setPlan(newPlan);
+
             await submitPlanUpdate(sessionId, newPlan);
-            // Don't immediately setPlan - let WebSocket/polling bring back the correctly-updated plan
-            // from the backend with proper step statuses (prior steps preserved, only edited & downstream reset)
+            // WebSocket/polling will eventually bring back the authoritative state (with updated statuses if re-run triggered)
         } catch (e) {
             setError('Failed to update plan: ' + e.message);
             setIsLoading(false);
@@ -447,6 +485,25 @@ function App() {
                 </div>
 
                 <div className="connection-status">
+                    <button
+                        onClick={() => setShowCreateAgentModal(true)}
+                        style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            background: 'rgba(255,255,255,0.1)',
+                            border: '1px solid rgba(255,255,255,0.2)',
+                            borderRadius: '20px',
+                            padding: '6px 12px',
+                            color: '#e2e8f0',
+                            cursor: 'pointer',
+                            fontSize: '0.85rem',
+                            marginRight: '16px'
+                        }}
+                    >
+                        <Bot size={14} />
+                        <span>Agents</span>
+                    </button>
                     <div className={`status-dot ${isConnected ? 'connected' : 'disconnected'}`}></div>
                     <span>{isConnected ? 'Connected' : 'Connecting...'}</span>
                 </div>
@@ -475,6 +532,7 @@ function App() {
                         plan={plan}
                         currentStep={currentStep}
                         logs={logs}
+                        toolActivity={toolActivity}
                     />
 
                     <PlanViewer
@@ -482,6 +540,9 @@ function App() {
                         currentStep={currentStep}
                         onUpdatePlan={handleUpdatePlan}
                         isEditable={status === 'executing' || status === 'planning' || status === 'completed'}
+                        logs={logs}
+                        artifacts={artifacts}
+                        apiBaseUrl={API_BASE_URL}
                     />
 
                     <ConversationMode
@@ -517,6 +578,16 @@ function App() {
                     onCancel={() => {
                         setShowApprovalModal(false);
                         setIsLoading(false);
+                    }}
+                />
+            )}
+
+            {showCreateAgentModal && (
+                <CreateAgentModal
+                    onClose={() => setShowCreateAgentModal(false)}
+                    onSave={(newAgentId) => {
+                        // Just close, next query will pick up new agent
+                        console.log("Created agent:", newAgentId);
                     }}
                 />
             )}

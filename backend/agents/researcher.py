@@ -90,7 +90,8 @@ Generate 1-3 focused search queries."""),
             for query in queries[:3]:  # Limit to 3 queries
                 await self.emit_event("searching", state, {
                     "step_id": step_id,
-                    "query": query
+                    "query": query,
+                    "tool": "web_search_api"
                 })
                 
                 results = await search_web(query)

@@ -8,7 +8,8 @@ import {
     PenTool,
     BrainCircuit,
     Bot,
-    Wand2
+    Wand2,
+    Trash2
 } from 'lucide-react';
 
 const nodeStyles = {
@@ -39,10 +40,15 @@ const AgentIcons = {
 };
 
 const AgentNode = ({ data, selected }) => {
+    // Defensive check
+    if (!data) return null;
+
     const statusColor = statusColors[data.status] || statusColors.pending;
     const isActive = data.status === 'in_progress';
     const isError = data.status === 'failed';
-    const IconComponent = AgentIcons[data.agent_type] || AgentIcons.default;
+    // Ensure agent_type is handled safely
+    const agentType = data.agent_type || 'default';
+    const IconComponent = AgentIcons[agentType] || AgentIcons.default;
 
     return (
         <motion.div
@@ -59,6 +65,37 @@ const AgentNode = ({ data, selected }) => {
             }}
         >
             <Handle type="target" position={Position.Top} style={{ width: '8px', height: '8px', background: '#9ca3af' }} />
+
+            {/* Delete Button for Custom Agents */}
+            {data.isCustom && (
+                <div
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        if (window.confirm(`Delete agent "${data.label}"?`)) {
+                            data.onDelete && data.onDelete(data.agent_type);
+                        }
+                    }}
+                    style={{
+                        position: 'absolute',
+                        top: '-8px',
+                        right: '-8px',
+                        background: '#ef4444',
+                        color: 'white',
+                        width: '24px',
+                        height: '24px',
+                        borderRadius: '50%',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        cursor: 'pointer',
+                        boxShadow: '0 2px 4px rgba(0,0,0,0.3)',
+                        zIndex: 10
+                    }}
+                    title="Delete Agent"
+                >
+                    <Trash2 size={12} />
+                </div>
+            )}
 
             <div
                 style={{
@@ -87,7 +124,7 @@ const AgentNode = ({ data, selected }) => {
 
             <div style={{ flex: 1 }}>
                 <h3 style={{ fontSize: '0.875rem', fontWeight: 600, color: '#efefef', margin: 0, lineHeight: 1.25 }}>
-                    {data.label}
+                    {data.label || 'Unknown Agent'}
                 </h3>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '4px' }}>
                     <span
