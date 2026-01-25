@@ -4,12 +4,18 @@ import { useState, useEffect, useCallback, useRef } from 'react';
  * Custom hook for WebSocket connection to the backend.
  * Handles connection, reconnection, and message handling.
  */
-export function useWebSocket(sessionId = null) {
+export function useWebSocket(sessionId = null, onMessage = null) {
     const [isConnected, setIsConnected] = useState(false);
     const [lastMessage, setLastMessage] = useState(null);
     const [messages, setMessages] = useState([]);
     const wsRef = useRef(null);
     const reconnectTimeoutRef = useRef(null);
+    const onMessageRef = useRef(onMessage);
+
+    // Update ref when callback changes
+    useEffect(() => {
+        onMessageRef.current = onMessage;
+    }, [onMessage]);
 
     const connect = useCallback(() => {
         // Determine WebSocket URL
@@ -47,6 +53,11 @@ export function useWebSocket(sessionId = null) {
                     const data = JSON.parse(event.data);
                     setLastMessage(data);
                     setMessages(prev => [...prev, data]);
+
+                    // Call callback if provided
+                    if (onMessageRef.current) {
+                        onMessageRef.current(data);
+                    }
                 } catch (e) {
                     console.error('Failed to parse WebSocket message:', e);
                 }

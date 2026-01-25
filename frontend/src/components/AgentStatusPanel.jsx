@@ -5,17 +5,18 @@ import ReactFlow, {
     useEdgesState,
     MarkerType,
     Controls,
-    Panel
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { nodeTypes } from './FlowNodes';
+import { edgeTypes } from './AnimatedEdge';
+import { BrainCircuit } from 'lucide-react';
 
 const AGENT_CONFIG = {
-    orchestrator: { icon: '🎯', label: 'Orchestrator', color: '#6366f1', position: { x: 450, y: 0 } },
-    researcher: { icon: '🔍', label: 'Researcher', color: '#3b82f6', position: { x: 0, y: 250 } },
-    analyst: { icon: '📊', label: 'Analyst', color: '#8b5cf6', position: { x: 300, y: 250 } },
-    coder: { icon: '💻', label: 'Coder', color: '#10b981', position: { x: 600, y: 250 } },
-    writer: { icon: '✍️', label: 'Writer', color: '#f59e0b', position: { x: 900, y: 250 } },
+    orchestrator: { label: 'Orchestrator', color: '#6366f1', position: { x: 450, y: 0 } },
+    researcher: { label: 'Researcher', color: '#3b82f6', position: { x: 0, y: 250 } },
+    analyst: { label: 'Analyst', color: '#8b5cf6', position: { x: 300, y: 250 } },
+    coder: { label: 'Coder', color: '#10b981', position: { x: 600, y: 250 } },
+    writer: { label: 'Writer', color: '#f59e0b', position: { x: 900, y: 250 } },
 };
 
 const INITIAL_NODES = Object.entries(AGENT_CONFIG).map(([type, config]) => ({
@@ -36,16 +37,15 @@ const INITIAL_EDGES = Object.keys(AGENT_CONFIG)
         id: `orchestrator-${type}`,
         source: 'orchestrator',
         target: type,
+        type: 'animated',
         animated: false,
         style: { stroke: '#333', strokeWidth: 1 },
         markerEnd: { type: MarkerType.ArrowClosed, color: '#333' },
+        data: { isActive: false, isCompleted: false },
     }));
 
 function getAgentStatus(agentType, plan) {
     if (agentType === 'orchestrator') {
-        // Orchestrator is active if plan is executing but no specific step is active (planning/aggregating)
-        // OR if it's coordinating active steps.
-        // For simplicity, make it active if we have a plan and it's not completed.
         if (!plan || plan.length === 0) return 'pending';
         const allCompleted = plan.every(s => s.status === 'completed');
         return allCompleted ? 'completed' : 'in_progress';
@@ -98,18 +98,25 @@ export function AgentStatusPanel({ plan, currentStep, logs }) {
                 const isActive = status === 'in_progress';
                 const isCompleted = status === 'completed';
 
+                // Blue for active, Green for completed
+                const activeColor = '#3b82f6';
+                const completedColor = '#10b981';
+                const inactiveColor = '#333';
+
                 return {
                     ...edge,
+                    type: 'animated',  // Ensure custom edge type is always used
                     animated: isActive,
+                    data: { isActive, isCompleted },
                     style: {
-                        stroke: isActive ? '#6366f1' : isCompleted ? '#10b981' : '#333',
-                        strokeWidth: isActive ? 3 : 1,
-                        filter: isActive ? 'drop-shadow(0 0 4px #6366f1)' : 'none',
+                        stroke: isActive ? activeColor : isCompleted ? completedColor : inactiveColor,
+                        strokeWidth: isActive ? 3 : isCompleted ? 2 : 1,
+                        filter: isActive ? `drop-shadow(0 0 4px ${activeColor})` : 'none',
                         opacity: isActive || isCompleted ? 1 : 0.5
                     },
                     markerEnd: {
                         type: MarkerType.ArrowClosed,
-                        color: isActive ? '#6366f1' : isCompleted ? '#10b981' : '#333',
+                        color: isActive ? activeColor : isCompleted ? completedColor : inactiveColor,
                     },
                 };
             })
@@ -128,7 +135,7 @@ export function AgentStatusPanel({ plan, currentStep, logs }) {
                 alignItems: 'center',
                 gap: '8px'
             }}>
-                <span style={{ fontSize: '1.25rem' }}>🤖</span>
+                <BrainCircuit size={20} color="#6366f1" />
                 <h2 style={{ fontSize: '1.125rem', fontWeight: 600, color: '#efefef', margin: 0 }}>Agent Network</h2>
             </div>
 
@@ -139,6 +146,7 @@ export function AgentStatusPanel({ plan, currentStep, logs }) {
                     onNodesChange={onNodesChange}
                     onEdgesChange={onEdgesChange}
                     nodeTypes={nodeTypes}
+                    edgeTypes={edgeTypes}
                     fitView
                     proOptions={{ hideAttribution: true }}
                 >

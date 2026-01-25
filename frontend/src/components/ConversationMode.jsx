@@ -30,7 +30,7 @@ export function ConversationMode({
     return (
         <div className="agent-panel">
             <div className="panel-header">
-                💬 Live Conversation
+                Live Conversation
                 {isCompleted && (
                     <span style={{
                         marginLeft: 'auto',
@@ -71,7 +71,7 @@ export function ConversationMode({
                                     color: 'var(--color-text-muted)',
                                     marginBottom: '0.25rem'
                                 }}>
-                                    {entry.role === 'user' ? '👤 You' : '🤖 Orchestrator'}
+                                    {entry.role === 'user' ? 'You' : 'Orchestrator'}
                                     {entry.type === 'refinement' && ' (Refinement)'}
                                 </div>
                                 <div style={{ color: 'var(--color-text-secondary)' }}>
@@ -116,7 +116,7 @@ export function ConversationMode({
                             onClick={handleSend}
                             disabled={!message.trim()}
                         >
-                            📤
+                            Send
                         </button>
                     </div>
                 )}

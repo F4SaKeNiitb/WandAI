@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Wand2, Sparkles, Loader2 } from 'lucide-react';
 
 const EXAMPLE_REQUESTS = [
     "What's the current stock price of Apple and create a summary?",
@@ -23,7 +24,12 @@ export function RequestInput({ onSubmit, isLoading }) {
     return (
         <div className="input-card">
             <div className="input-header">
-                <h2>🪄 New Request</h2>
+                <h2>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                        <Wand2 size={24} color="#6366f1" />
+                        New Request
+                    </span>
+                </h2>
                 <p>Describe what you'd like to accomplish in plain language</p>
             </div>
 
@@ -44,12 +50,13 @@ export function RequestInput({ onSubmit, isLoading }) {
                     >
                         {isLoading ? (
                             <>
-                                <span className="spinner"></span>
+                                <Loader2 size={16} className="spinner" />
                                 Processing...
                             </>
                         ) : (
                             <>
-                                ✨ Execute Request
+                                <Sparkles size={16} />
+                                Execute Request
                             </>
                         )}
                     </button>

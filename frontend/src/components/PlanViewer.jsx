@@ -1,11 +1,3 @@
-const AGENT_ICONS = {
-    orchestrator: '🎯',
-    researcher: '🔍',
-    coder: '💻',
-    analyst: '📊',
-    writer: '✍️',
-};
-
 import { useEffect, useMemo, useCallback, useState } from 'react';
 import ReactFlow, {
     Background,
@@ -18,6 +10,7 @@ import 'reactflow/dist/style.css';
 import { nodeTypes } from './FlowNodes';
 import { StepDetailModal } from './StepDetailModal';
 import dagre from 'dagre';
+import { Edit2, Save, X, Loader2, CheckCircle2, XCircle, AlertTriangle } from 'lucide-react';
 
 const dagreGraph = new dagre.graphlib.Graph();
 dagreGraph.setDefaultEdgeLabel(() => ({}));
@@ -71,7 +64,16 @@ export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable }) {
     };
 
     const handleSave = () => {
-        onUpdatePlan(editedPlan);
+        // Merge edited fields with original plan, preserving statuses
+        const mergedPlan = plan.map((originalStep, index) => {
+            const editedStep = editedPlan[index];
+            return {
+                ...originalStep,
+                description: editedStep.description,
+                agent_type: editedStep.agent_type,
+            };
+        });
+        onUpdatePlan(mergedPlan);
         setIsEditing(false);
     };
 
@@ -93,7 +95,6 @@ export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable }) {
                 description: step.description,
                 status: step.status || 'pending',
                 agent_type: step.agent_type,
-                agent_icon: AGENT_ICONS[step.agent_type] || '🤖',
                 result: step.result,
                 error: step.error
             },
@@ -169,24 +170,57 @@ export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable }) {
                         <button
                             className="btn-xs"
                             onClick={() => setIsEditing(true)}
-                            style={{ padding: '2px 8px', fontSize: '0.75rem', background: '#333', color: '#efefef', borderRadius: '4px', border: 'none', cursor: 'pointer' }}
+                            style={{
+                                padding: '4px 8px',
+                                fontSize: '0.75rem',
+                                background: '#333',
+                                color: '#efefef',
+                                borderRadius: '4px',
+                                border: 'none',
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '4px'
+                            }}
                         >
-                            ✏️ Edit
+                            <Edit2 size={12} /> Edit
                         </button>
                     )}
                     {isEditing && (
                         <div style={{ display: 'flex', gap: '4px' }}>
                             <button
                                 onClick={handleSave}
-                                style={{ padding: '2px 8px', fontSize: '0.75rem', background: '#22c55e', color: 'white', borderRadius: '4px', border: 'none', cursor: 'pointer' }}
+                                style={{
+                                    padding: '4px 8px',
+                                    fontSize: '0.75rem',
+                                    background: '#22c55e',
+                                    color: 'white',
+                                    borderRadius: '4px',
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '4px'
+                                }}
                             >
-                                Save
+                                <Save size={12} /> Save
                             </button>
                             <button
                                 onClick={() => setIsEditing(false)}
-                                style={{ padding: '2px 8px', fontSize: '0.75rem', background: '#ef4444', color: 'white', borderRadius: '4px', border: 'none', cursor: 'pointer' }}
+                                style={{
+                                    padding: '4px 8px',
+                                    fontSize: '0.75rem',
+                                    background: '#ef4444',
+                                    color: 'white',
+                                    borderRadius: '4px',
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: '4px'
+                                }}
                             >
-                                Cancel
+                                <X size={12} /> Cancel
                             </button>
                         </div>
                     )}
@@ -199,54 +233,80 @@ export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable }) {
             <div style={{ height: 'calc(100% - 60px)', overflowY: isEditing ? 'auto' : 'hidden' }}>
                 {isEditing ? (
                     <div className="plan-editor" style={{ padding: '16px' }}>
-                        {editedPlan.map((step, index) => (
-                            <div key={step.id || index} style={{
-                                display: 'flex',
-                                gap: '8px',
-                                marginBottom: '12px',
-                                padding: '8px',
-                                background: '#1a1a1a',
-                                borderRadius: '6px',
-                                border: '1px solid #333',
-                                alignItems: 'center'
-                            }}>
-                                <span style={{ fontWeight: 600, color: '#9ca3af', minWidth: '24px' }}>{index + 1}.</span>
-                                <div style={{ flex: 1 }}>
-                                    <input
-                                        type="text"
-                                        value={step.description}
-                                        onChange={(e) => handlePlanChange(index, 'description', e.target.value)}
-                                        style={{
-                                            width: '100%',
-                                            padding: '6px',
-                                            border: '1px solid #333',
-                                            background: '#222',
-                                            color: '#efefef',
-                                            borderRadius: '4px',
-                                            marginBottom: '4px'
-                                        }}
-                                    />
-                                    <select
-                                        value={step.agent_type}
-                                        onChange={(e) => handlePlanChange(index, 'agent_type', e.target.value)}
-                                        style={{
-                                            padding: '4px',
-                                            border: '1px solid #333',
-                                            background: '#222',
-                                            color: '#efefef',
-                                            borderRadius: '4px',
-                                            fontSize: '0.875rem'
-                                        }}
-                                    >
-                                        <option value="researcher">Researcher</option>
-                                        <option value="coder">Coder</option>
-                                        <option value="analyst">Analyst</option>
-                                        <option value="writer">Writer</option>
-                                        <option value="orchestrator">Orchestrator</option>
-                                    </select>
+                        {editedPlan.map((step, index) => {
+                            const originalStep = plan[index];
+                            const isCompleted = originalStep?.status === 'completed';
+                            const isFailed = originalStep?.status === 'failed';
+                            const isInProgress = originalStep?.status === 'in_progress';
+
+                            return (
+                                <div key={step.id || index} style={{
+                                    display: 'flex',
+                                    gap: '8px',
+                                    marginBottom: '12px',
+                                    padding: '8px',
+                                    background: '#1a1a1a',
+                                    borderRadius: '6px',
+                                    border: `1px solid ${isCompleted ? '#10b981' : isFailed ? '#ef4444' : isInProgress ? '#3b82f6' : '#333'}`,
+                                    alignItems: 'center'
+                                }}>
+                                    <span style={{
+                                        fontWeight: 600,
+                                        color: isCompleted ? '#10b981' : isFailed ? '#ef4444' : isInProgress ? '#3b82f6' : '#9ca3af',
+                                        minWidth: '24px',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center'
+                                    }}>
+                                        {isCompleted ? <CheckCircle2 size={16} /> :
+                                            isFailed ? <XCircle size={16} /> :
+                                                isInProgress ? <Loader2 size={16} className="spinner" /> :
+                                                    `${index + 1}.`}
+                                    </span>
+                                    <div style={{ flex: 1 }}>
+                                        <input
+                                            type="text"
+                                            value={step.description}
+                                            onChange={(e) => handlePlanChange(index, 'description', e.target.value)}
+                                            style={{
+                                                width: '100%',
+                                                padding: '6px',
+                                                border: '1px solid #333',
+                                                background: '#222',
+                                                color: '#efefef',
+                                                borderRadius: '4px',
+                                                marginBottom: '4px'
+                                            }}
+                                        />
+                                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                            <select
+                                                value={step.agent_type}
+                                                onChange={(e) => handlePlanChange(index, 'agent_type', e.target.value)}
+                                                style={{
+                                                    padding: '4px',
+                                                    border: '1px solid #333',
+                                                    background: '#222',
+                                                    color: '#efefef',
+                                                    borderRadius: '4px',
+                                                    fontSize: '0.875rem'
+                                                }}
+                                            >
+                                                <option value="researcher">Researcher</option>
+                                                <option value="coder">Coder</option>
+                                                <option value="analyst">Analyst</option>
+                                                <option value="writer">Writer</option>
+                                                <option value="orchestrator">Orchestrator</option>
+                                            </select>
+                                            {isCompleted && (
+                                                <span style={{ fontSize: '0.7rem', color: '#f59e0b', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                                                    <AlertTriangle size={12} /> Editing will re-run this & downstream steps
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
                                 </div>
-                            </div>
-                        ))}
+                            );
+                        })}
                     </div>
                 ) : (
                     plan.length > 0 ? (

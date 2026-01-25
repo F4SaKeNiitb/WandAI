@@ -14,11 +14,11 @@ function formatTime(timestamp) {
 }
 
 const AGENT_ICONS = {
-    orchestrator: '🎯',
-    researcher: '🔍',
-    coder: '💻',
-    analyst: '📊',
-    writer: '✍️',
+    orchestrator: 'ORCHESTRATOR',
+    researcher: 'RESEARCHER',
+    coder: 'CODER',
+    analyst: 'ANALYST',
+    writer: 'WRITER',
 };
 
 export function LogsPanel({ logs }) {
@@ -26,7 +26,7 @@ export function LogsPanel({ logs }) {
         return (
             <div className="agent-panel">
                 <div className="panel-header">
-                    📜 Activity Log
+                    Activity Log
                 </div>
                 <div className="panel-content">
                     <div className="empty-state" style={{ padding: '2rem 1rem' }}>
@@ -43,7 +43,7 @@ export function LogsPanel({ logs }) {
     return (
         <div className="agent-panel">
             <div className="panel-header">
-                📜 Activity Log ({logs.length} events)
+                Activity Log ({logs.length} events)
             </div>
             <div className="panel-content logs-panel">
                 {recentLogs.map((log, index) => (

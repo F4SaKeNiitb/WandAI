@@ -87,13 +87,15 @@ function processInline(text) {
     return <span dangerouslySetInnerHTML={{ __html: text }} />;
 }
 
+import { FileText, Bot, AlertTriangle } from 'lucide-react';
+
 export function ResultDisplay({ status, result, error, artifacts }) {
     const hasCharts = artifacts?.some(a => a.type === 'chart' || a.type === 'image');
 
     return (
         <div className="result-section">
             <div className="result-header">
-                <h3>📄 Result</h3>
+                <h3><span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}><FileText size={18} /> Result</span></h3>
                 <span className={`status-badge ${status}`}>
                     {status?.replace('_', ' ') || 'pending'}
                 </span>
@@ -101,7 +103,9 @@ export function ResultDisplay({ status, result, error, artifacts }) {
             <div className="result-content">
                 {!result && !error && status !== 'completed' && (
                     <div className="empty-state">
-                        <div className="empty-state-icon">✨</div>
+                        <div className="empty-state-icon">
+                            <Bot size={48} strokeWidth={1.5} color="#4b5563" />
+                        </div>
                         <h4>Ready to Execute</h4>
                         <p>Submit a request above to see results here</p>
                     </div>
@@ -112,9 +116,12 @@ export function ResultDisplay({ status, result, error, artifacts }) {
                         color: 'var(--color-error)',
                         padding: '1rem',
                         background: 'rgba(239, 68, 68, 0.1)',
-                        borderRadius: 'var(--radius-md)'
+                        borderRadius: 'var(--radius-md)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px'
                     }}>
-                        ⚠️ {error}
+                        <AlertTriangle size={20} /> {error}
                     </div>
                 )}
 

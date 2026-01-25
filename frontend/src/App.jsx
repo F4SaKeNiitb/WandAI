@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { Wand2 } from 'lucide-react';
 import { useWebSocket } from './hooks/useWebSocket';
 import { RequestInput } from './components/RequestInput';
 import { AgentStatusPanel } from './components/AgentStatusPanel';
@@ -110,24 +111,38 @@ function App() {
     const [error, setError] = useState(null);
     const [artifacts, setArtifacts] = useState([]);
 
-    // Conversation state (stretch goals)
-    const [conversationHistory, setConversationHistory] = useState([]);
+    // Conversation state
+    const [conversationHistory, setConversationHistory] = useState([]); // Server state
+    const [pendingMessages, setPendingMessages] = useState([]); // Optimistic local state
 
     // Modal states
     const [clarificationQuestions, setClarificationQuestions] = useState(null);
     const [showApprovalModal, setShowApprovalModal] = useState(false);
     const [isSubmittingClarification, setIsSubmittingClarification] = useState(false);
 
-    // WebSocket connection
-    const { isConnected, lastMessage, subscribe, clearMessages } = useWebSocket();
+    // Forward ref for handleRefine to avoid circular dependencies
+    const handleRefineRef = useRef(null);
 
-    // Handle incoming WebSocket messages
-    useEffect(() => {
-        if (!lastMessage) return;
+    // Helper to update history and remove matching pending messages
+    const updateHistory = useCallback((newServerHistory) => {
+        setConversationHistory(newServerHistory);
 
-        console.log('WS Event:', lastMessage);
+        // Remove pending messages that are now in server history
+        setPendingMessages(prev => prev.filter(pending => {
+            // Check if this pending message is present in the new server history
+            // We match by content and role
+            const existsInServer = newServerHistory.some(serverMsg =>
+                serverMsg.role === pending.role &&
+                serverMsg.content === pending.content
+            );
+            return !existsInServer;
+        }));
+    }, []);
 
-        const { type, ...data } = lastMessage;
+    // WebSocket message handler
+    const handleWebSocketMessage = useCallback((data) => {
+        console.log('WS Event:', data);
+        const { type } = data;
 
         // Update state based on event type
         if (data.status) {
@@ -145,6 +160,10 @@ function App() {
 
         if (data.current_step !== undefined) {
             setCurrentStep(data.current_step);
+        }
+
+        if (data.conversation_history) {
+            updateHistory(data.conversation_history);
         }
 
         // Handle specific events
@@ -173,7 +192,7 @@ function App() {
                     });
                     // Also fetch conversation history
                     getConversationHistory(sessionId).then(res => {
-                        setConversationHistory(res.conversation || []);
+                        updateHistory(res.conversation || []);
                     });
                 }
                 break;
@@ -185,6 +204,15 @@ function App() {
                     content: data.response,
                     type: 'chat'
                 }]);
+                break;
+
+            case 'refinement_intent_detected':
+                // Automatically trigger refinement flow
+                if (data.refinement) {
+                    if (handleRefineRef.current) {
+                        handleRefineRef.current(data.refinement);
+                    }
+                }
                 break;
 
             case 'refinement_started':
@@ -203,11 +231,15 @@ function App() {
                     setLogs(prev => [...prev, data.latest_log]);
                 }
         }
-    }, [lastMessage, sessionId, isSubmittingClarification]);
+    }, [sessionId, isSubmittingClarification, updateHistory]); // Dependencies
+
+    // WebSocket connection
+    const { isConnected, subscribe, clearMessages } = useWebSocket(null, handleWebSocketMessage);
+
 
     // Poll for status updates (backup for WebSocket)
     useEffect(() => {
-        if (!sessionId || !isLoading) return;
+        if (!sessionId) return;
 
         const interval = setInterval(async () => {
             try {
@@ -223,13 +255,16 @@ function App() {
                 setCurrentStep(statusData.current_step || 0);
                 setLogs(statusData.logs || []);
                 if (statusData.conversation_history) {
-                    setConversationHistory(statusData.conversation_history);
+                    updateHistory(statusData.conversation_history);
                 }
 
                 if (statusData.status === 'completed') {
                     setResult(statusData.final_response);
                     setArtifacts(statusData.artifacts || []);
-                    setIsLoading(false);
+                    if (status !== 'planning' && status !== 'executing') {
+                        // Only turn off loading if we are truly done and not restarted
+                        setIsLoading(false);
+                    }
                 } else if (statusData.status === 'error') {
                     setError(statusData.error_message);
                     setIsLoading(false);
@@ -248,7 +283,7 @@ function App() {
         }, 2000);
 
         return () => clearInterval(interval);
-    }, [sessionId, isLoading, isSubmittingClarification]);
+    }, [sessionId, isSubmittingClarification, status, updateHistory]);
 
     // Handle request submission
     const handleSubmit = useCallback(async (request) => {
@@ -262,6 +297,8 @@ function App() {
         setCurrentStep(0);
         setStatus('pending');
         setIsSubmittingClarification(false);
+        setConversationHistory([]);
+        setPendingMessages([]); // Clear pending
         clearMessages();
 
         try {
@@ -310,16 +347,31 @@ function App() {
 
     // Handle mid-execution plan update
     const handleUpdatePlan = useCallback(async (newPlan) => {
-        setIsLoading(true);
         try {
+            // Check if any completed steps were modified (will trigger re-execution)
+            const hasCompletedChanges = plan.some((oldStep, index) => {
+                const newStep = newPlan[index];
+                if (!newStep) return false;
+                const wasCompleted = oldStep.status === 'completed' || oldStep.status === 'failed';
+                const hasChanged = oldStep.description !== newStep.description ||
+                    oldStep.agent_type !== newStep.agent_type;
+                return wasCompleted && hasChanged;
+            });
+
+            // If editing completed steps or status was 'completed', trigger loading state
+            if (hasCompletedChanges || status === 'completed') {
+                setIsLoading(true);
+                setStatus('executing');  // Reset status to show we're re-executing
+            }
+
             await submitPlanUpdate(sessionId, newPlan);
-            setPlan(newPlan);
-            setIsLoading(false);
+            // Don't immediately setPlan - let WebSocket/polling bring back the correctly-updated plan
+            // from the backend with proper step statuses (prior steps preserved, only edited & downstream reset)
         } catch (e) {
             setError('Failed to update plan: ' + e.message);
             setIsLoading(false);
         }
-    }, [sessionId]);
+    }, [sessionId, plan, status]);
 
     // Handle plan modification
     const handleModify = useCallback(async (modifications) => {
@@ -338,26 +390,29 @@ function App() {
     const handleSendMessage = useCallback(async (message) => {
         if (!sessionId) return;
 
-        // Optimistically add user message to history
-        setConversationHistory(prev => [...prev, {
+        // Add to pending messages instead of main history
+        setPendingMessages(prev => [...prev, {
             role: 'user',
             content: message,
             type: 'chat'
         }]);
 
+        // Indicate loading to encourage polling/show activity
+        setIsLoading(true);
+
         try {
             await sendChatMessage(sessionId, message);
         } catch (e) {
             console.error('Failed to send chat message:', e);
+            setIsLoading(false);
         }
     }, [sessionId]);
 
-    // Handle refinement request (Multi-turn Refinement)
     const handleRefine = useCallback(async (refinement) => {
         if (!sessionId) return;
 
-        // Add refinement to history
-        setConversationHistory(prev => [...prev, {
+        // Add to pending messages
+        setPendingMessages(prev => [...prev, {
             role: 'user',
             content: `[Refinement]: ${refinement}`,
             type: 'refinement'
@@ -374,12 +429,17 @@ function App() {
         }
     }, [sessionId]);
 
+    // Update the ref whenever handleRefine changes
+    useEffect(() => {
+        handleRefineRef.current = handleRefine;
+    }, [handleRefine]);
+
     return (
         <div className="app-container">
             {/* Header */}
             <header className="header">
                 <div className="logo">
-                    <div className="logo-icon">🪄</div>
+                    <Wand2 className="logo-icon" size={32} />
                     <div>
                         <div className="logo-text">WandAI</div>
                         <div className="logo-subtitle">Multi-Agent Orchestration</div>
@@ -421,14 +481,14 @@ function App() {
                         plan={plan}
                         currentStep={currentStep}
                         onUpdatePlan={handleUpdatePlan}
-                        isEditable={status === 'executing' || status === 'planning'}
+                        isEditable={status === 'executing' || status === 'planning' || status === 'completed'}
                     />
 
                     <ConversationMode
                         sessionId={sessionId}
                         isActive={!!sessionId}
                         status={status}
-                        conversationHistory={conversationHistory}
+                        conversationHistory={[...conversationHistory, ...pendingMessages]}
                         onSendMessage={handleSendMessage}
                         onRefine={handleRefine}
                     />

@@ -1,6 +1,15 @@
 import { memo } from 'react';
 import { Handle, Position } from 'reactflow';
 import { motion } from 'framer-motion';
+import {
+    Search,
+    Terminal,
+    BarChart3,
+    PenTool,
+    BrainCircuit,
+    Bot,
+    Wand2
+} from 'lucide-react';
 
 const nodeStyles = {
     padding: '10px 15px',
@@ -20,19 +29,20 @@ const statusColors = {
     retrying: '#f59e0b',
 };
 
-const agentIcons = {
-    researcher: '🔍',
-    coder: '💻',
-    analyst: '📊',
-    writer: '📝',
-    orchestrator: '🪄',
-    default: '🤖'
+const AgentIcons = {
+    researcher: Search,
+    coder: Terminal,
+    analyst: BarChart3,
+    writer: PenTool,
+    orchestrator: BrainCircuit,
+    default: Bot
 };
 
 const AgentNode = ({ data, selected }) => {
     const statusColor = statusColors[data.status] || statusColors.pending;
     const isActive = data.status === 'in_progress';
     const isError = data.status === 'failed';
+    const IconComponent = AgentIcons[data.agent_type] || AgentIcons.default;
 
     return (
         <motion.div
@@ -58,7 +68,7 @@ const AgentNode = ({ data, selected }) => {
                     width: '40px',
                     height: '40px',
                     borderRadius: '50%',
-                    fontSize: '1.25rem',
+                    color: statusColor,
                     background: `${statusColor}20`
                 }}
             >
@@ -68,10 +78,10 @@ const AgentNode = ({ data, selected }) => {
                         transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
                         style={{ display: 'flex' }}
                     >
-                        {agentIcons[data.agent_type] || agentIcons.default}
+                        <IconComponent size={20} />
                     </motion.div>
                 ) : (
-                    <span>{agentIcons[data.agent_type] || agentIcons.default}</span>
+                    <IconComponent size={20} />
                 )}
             </div>
 

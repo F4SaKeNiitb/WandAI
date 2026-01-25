@@ -58,6 +58,8 @@ body {
   color: var(--color-text-primary);
   min-height: 100vh;
   line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 /* Layout */
@@ -90,7 +92,10 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 1.5rem;
+  color: white;
+  /* Ensure SVG is white */
+  padding: 8px;
+  /* Padding for SVG */
 }
 
 .logo-text {
@@ -142,6 +147,16 @@ body {
 
   50% {
     opacity: 0.5;
+  }
+}
+
+@keyframes flowAnimation {
+  0% {
+    stroke-dashoffset: 0;
+  }
+
+  100% {
+    stroke-dashoffset: -12;
   }
 }
 
