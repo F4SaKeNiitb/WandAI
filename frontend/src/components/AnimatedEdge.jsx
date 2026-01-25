@@ -45,23 +45,21 @@ export function AnimatedEdge({
                     <path
                         d={edgePath}
                         style={{
-                            stroke: activeColor,
-                            strokeWidth: 20,
                             fill: 'none',
-                            opacity: 0.3,
+                            opacity: 0.2, // Reduced from 0.3
                             filter: `blur(8px)`,
                             transition: 'opacity 0.3s ease',
-                            pointerEvents: 'none', // Don't block interactions
+                            pointerEvents: 'none',
                         }}
                     />
-                    {/* Inner intense glow */}
+                    {/* Inner intense glow - Reduced width */}
                     <path
                         d={edgePath}
                         style={{
                             stroke: activeColor,
-                            strokeWidth: 8,
+                            strokeWidth: 4, // Reduced from 8
                             fill: 'none',
-                            opacity: 0.6,
+                            opacity: 0.4, // Reduced from 0.6
                             filter: `blur(3px)`,
                             transition: 'opacity 0.3s ease',
                             pointerEvents: 'none',
@@ -78,9 +76,9 @@ export function AnimatedEdge({
                 style={{
                     ...style,
                     stroke: edgeColor,
-                    strokeWidth: isActive ? 3 : isCompleted ? 2 : 1,
+                    strokeWidth: isActive ? 2 : isCompleted ? 2 : 1, // Reduced active width from 3 to 2
                     fill: 'none',
-                    filter: isActive ? `drop-shadow(0 0 4px ${activeColor})` : 'none',
+                    filter: isActive ? `drop-shadow(0 0 2px ${activeColor})` : 'none', // Reduced shadow
                 }}
                 markerEnd={markerEnd}
             />
@@ -88,30 +86,21 @@ export function AnimatedEdge({
             {/* Animated circle that moves along the path when active */}
             {isActive && (
                 <>
-                    {/* Animated dot 1 */}
-                    <circle r="6" fill={activeColor} filter={`drop-shadow(0 0 6px ${activeColor})`}>
+                    {/* Animated dot 1 - Slower speed */}
+                    <circle r="4" fill={activeColor} filter={`drop-shadow(0 0 4px ${activeColor})`}>
                         <animateMotion
-                            dur="1.5s"
+                            dur="3s" // Slowed from 1.5s
                             repeatCount="indefinite"
                             path={edgePath}
                         />
                     </circle>
-                    {/* Animated dot 2 (offset) */}
-                    <circle r="4" fill={activeColor} opacity="0.6" filter={`drop-shadow(0 0 4px ${activeColor})`}>
+                    {/* Animated dot 2 (offset) - Removed dot 3 entirely */}
+                    <circle r="3" fill={activeColor} opacity="0.5" filter={`drop-shadow(0 0 2px ${activeColor})`}>
                         <animateMotion
-                            dur="1.5s"
+                            dur="3s" // Slowed from 1.5s
                             repeatCount="indefinite"
                             path={edgePath}
-                            begin="0.5s"
-                        />
-                    </circle>
-                    {/* Animated dot 3 (offset) */}
-                    <circle r="3" fill={activeColor} opacity="0.4">
-                        <animateMotion
-                            dur="1.5s"
-                            repeatCount="indefinite"
-                            path={edgePath}
-                            begin="1s"
+                            begin="1.5s" // Adjusted timing
                         />
                     </circle>
                 </>

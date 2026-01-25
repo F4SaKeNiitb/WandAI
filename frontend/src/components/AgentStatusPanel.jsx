@@ -99,24 +99,36 @@ export function AgentStatusPanel({ plan, currentStep, logs }) {
                 const isCompleted = status === 'completed';
 
                 // Blue for active, Green for completed
+                // User Request: Lines should ALWAYS be glowing and animated
+                // We keep the color logic (Blue for active/pending, Green for completed) 
+                // but force animation and glow effects.
+
                 const activeColor = '#3b82f6';
                 const completedColor = '#10b981';
                 const inactiveColor = '#333';
 
+                // Determine color based on status, but default to active blue if pending/idle
+                // to ensure it looks "glowing" as requested.
+                let edgeColor = activeColor;
+                if (isCompleted) edgeColor = completedColor;
+
                 return {
                     ...edge,
-                    type: 'animated',  // Ensure custom edge type is always used
-                    animated: isActive,
-                    data: { isActive, isCompleted },
+                    type: 'animated',
+                    animated: true, // ALWAYS ANIMATED
+                    data: {
+                        isActive: true, // ALWAYS GLOWING
+                        isCompleted
+                    },
                     style: {
-                        stroke: isActive ? activeColor : isCompleted ? completedColor : inactiveColor,
-                        strokeWidth: isActive ? 3 : isCompleted ? 2 : 1,
-                        filter: isActive ? `drop-shadow(0 0 4px ${activeColor})` : 'none',
-                        opacity: isActive || isCompleted ? 1 : 0.5
+                        stroke: edgeColor,
+                        strokeWidth: 3, // Always thick
+                        filter: `drop-shadow(0 0 4px ${edgeColor})`, // Always glowing
+                        opacity: 1
                     },
                     markerEnd: {
                         type: MarkerType.ArrowClosed,
-                        color: isActive ? activeColor : isCompleted ? completedColor : inactiveColor,
+                        color: edgeColor,
                     },
                 };
             })
