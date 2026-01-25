@@ -13,11 +13,20 @@ export function useWebSocket(sessionId = null) {
 
     const connect = useCallback(() => {
         // Determine WebSocket URL
-        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-        const host = window.location.host;
-        const wsUrl = sessionId
-            ? `${protocol}//${host}/ws/${sessionId}`
-            : `${protocol}//${host}/ws`;
+        const apiUrl = import.meta.env.VITE_API_URL || '';
+        const isSecure = apiUrl.startsWith('https:');
+        const defaultProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const defaultHost = window.location.host;
+
+        let wsUrl;
+        if (apiUrl) {
+            const wsBase = apiUrl.replace(/^http/, 'ws').replace(/\/$/, '');
+            wsUrl = sessionId ? `${wsBase}/ws/${sessionId}` : `${wsBase}/ws`;
+        } else {
+            wsUrl = sessionId
+                ? `${defaultProtocol}//${defaultHost}/ws/${sessionId}`
+                : `${defaultProtocol}//${defaultHost}/ws`;
+        }
 
         try {
             const ws = new WebSocket(wsUrl);

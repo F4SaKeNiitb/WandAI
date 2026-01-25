@@ -42,7 +42,7 @@
 6. **Port**: `80`
 7. **Build Arguments** (if needed):
    - Click "Add Build Argument"
-   - `BACKEND_URL=https://api-wandai.yourdomain.com` (your backend URL from step 1)
+   - `VITE_API_URL=https://api-wandai.yourdomain.com` (your backend URL from step 1)
 8. **Domain**: Assign a domain (e.g., `wandai.yourdomain.com`)
 9. Click **"Deploy"**
 
@@ -73,7 +73,7 @@ Coolify automatically provisions Let's Encrypt SSL certificates. Just ensure:
 
 ### Frontend Issues
 - Check browser console for API connection errors
-- Verify `BACKEND_URL` in nginx.conf points to correct backend
+- Verify `VITE_API_URL` build argument was correct during builds
 - Ensure CORS is enabled on backend
 
 ### WebSocket Connection Fails

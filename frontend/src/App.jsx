@@ -8,9 +8,12 @@ import { ClarificationModal, ApprovalModal } from './components/ClarificationMod
 import { LogsPanel } from './components/LogsPanel';
 import { ConversationMode } from './components/ConversationMode';
 
+// API basic configuration
+const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+
 // API calls
 async function submitRequest(request) {
-    const response = await fetch('/api/execute', {
+    const response = await fetch(`${API_BASE_URL}/api/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -22,7 +25,7 @@ async function submitRequest(request) {
 }
 
 async function submitClarifications(sessionId, clarifications) {
-    const response = await fetch('/api/clarify', {
+    const response = await fetch(`${API_BASE_URL}/api/clarify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -34,7 +37,7 @@ async function submitClarifications(sessionId, clarifications) {
 }
 
 async function submitApproval(sessionId, approved, modifications = null, newPlan = null) {
-    const response = await fetch('/api/approve', {
+    const response = await fetch(`${API_BASE_URL}/api/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -48,7 +51,7 @@ async function submitApproval(sessionId, approved, modifications = null, newPlan
 }
 
 async function submitPlanUpdate(sessionId, plan) {
-    const response = await fetch('/api/plan', {
+    const response = await fetch(`${API_BASE_URL}/api/plan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -60,13 +63,13 @@ async function submitPlanUpdate(sessionId, plan) {
 }
 
 async function getSessionStatus(sessionId) {
-    const response = await fetch(`/api/status/${sessionId}`);
+    const response = await fetch(`${API_BASE_URL}/api/status/${sessionId}`);
     return response.json();
 }
 
 // Live Conversation & Refinement API calls
 async function sendChatMessage(sessionId, message) {
-    const response = await fetch('/api/chat', {
+    const response = await fetch(`${API_BASE_URL}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -78,7 +81,7 @@ async function sendChatMessage(sessionId, message) {
 }
 
 async function sendRefinement(sessionId, refinement, keepArtifacts = true) {
-    const response = await fetch('/api/refine', {
+    const response = await fetch(`${API_BASE_URL}/api/refine`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -91,7 +94,7 @@ async function sendRefinement(sessionId, refinement, keepArtifacts = true) {
 }
 
 async function getConversationHistory(sessionId) {
-    const response = await fetch(`/api/conversation/${sessionId}`);
+    const response = await fetch(`${API_BASE_URL}/api/conversation/${sessionId}`);
     return response.json();
 }
 
