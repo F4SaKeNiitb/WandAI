@@ -1,0 +1,33 @@
+# Core Framework
+fastapi
+uvicorn[standard]
+python-dotenv
+pydantic
+
+# LangChain & LangGraph
+langgraph
+langchain
+langchain-google-genai
+langchain-openai
+langchain-community
+langgraph-checkpoint-sqlite
+aiosqlite
+
+# Tools & Utilities
+httpx
+aiohttp
+
+# Data Processing & Charts
+pandas
+matplotlib
+numpy
+
+# Search API
+tavily-python
+
+# Testing
+pytest
+pytest-asyncio
+
+# WebSocket support (included in uvicorn[standard])
+websockets
