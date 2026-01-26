@@ -8,7 +8,6 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { nodeTypes } from './FlowNodes';
-import { StepDetailModal } from './StepDetailModal';
 import { CreateAgentModal } from './CreateAgentModal';
 import dagre from 'dagre';
 import { Edit2, Save, X, Loader2, CheckCircle2, XCircle, AlertTriangle, Search, Code2, LineChart, PenTool, BrainCircuit, Bot, Plus, Trash2 } from 'lucide-react';
@@ -52,10 +51,9 @@ const AGENT_ICONS = {
     writer: <PenTool size={14} />,
 };
 
-export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable, logs, artifacts, apiBaseUrl }) {
+export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable, logs, artifacts, apiBaseUrl, onStepClick }) {
     const [nodes, setNodes, onNodesChange] = useNodesState([]);
     const [edges, setEdges, onEdgesState] = useEdgesState([]);
-    const [selectedStep, setSelectedStep] = useState(null);
     const [isEditing, setIsEditing] = useState(false);
     const [editedPlan, setEditedPlan] = useState([]);
     const [availableAgents, setAvailableAgents] = useState([]);
@@ -180,9 +178,11 @@ export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable, logs, 
 
     const onNodeClick = useCallback((event, node) => {
         if (node.type === 'agentNode') {
-            setSelectedStep(node.data);
+            if (onStepClick) {
+                onStepClick(node.data);
+            }
         }
-    }, []);
+    }, [onStepClick]);
 
     // Transform plan into graph elements
     useEffect(() => {
@@ -501,16 +501,6 @@ export function PlanViewer({ plan, currentStep, onUpdatePlan, isEditable, logs, 
                 )}
             </div>
 
-            {
-                selectedStep && (
-                    <StepDetailModal
-                        step={selectedStep}
-                        logs={logs}
-                        artifacts={artifacts}
-                        onClose={() => setSelectedStep(null)}
-                    />
-                )
-            }
             {
                 showCreateAgentModal && (
                     <CreateAgentModal

@@ -9,6 +9,7 @@ import { ClarificationModal, ApprovalModal } from './components/ClarificationMod
 import { CreateAgentModal } from './components/CreateAgentModal';
 import { LogsPanel } from './components/LogsPanel';
 import { ConversationMode } from './components/ConversationMode';
+import { StepDetailModal } from './components/StepDetailModal';
 
 // API basic configuration
 const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '');
@@ -136,6 +137,7 @@ function App() {
     const [showApprovalModal, setShowApprovalModal] = useState(false);
     const [showCreateAgentModal, setShowCreateAgentModal] = useState(false);
     const [isSubmittingClarification, setIsSubmittingClarification] = useState(false);
+    const [selectedStep, setSelectedStep] = useState(null);
 
     // Forward ref for handleRefine to avoid circular dependencies
     const handleRefineRef = useRef(null);
@@ -604,6 +606,7 @@ function App() {
                         logs={logs}
                         artifacts={artifacts}
                         apiBaseUrl={API_BASE_URL}
+                        onStepClick={setSelectedStep}
                     />
 
                     <ConversationMode
@@ -665,6 +668,15 @@ function App() {
                         // Just close, next query will pick up new agent
                         console.log("Created agent:", newAgentId);
                     }}
+                />
+            )}
+
+            {selectedStep && (
+                <StepDetailModal
+                    step={selectedStep}
+                    logs={logs}
+                    artifacts={artifacts}
+                    onClose={() => setSelectedStep(null)}
                 />
             )}
         </div>
