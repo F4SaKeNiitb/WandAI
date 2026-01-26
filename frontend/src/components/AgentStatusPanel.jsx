@@ -169,11 +169,22 @@ export function AgentStatusPanel({ plan, currentStep, logs, toolActivity }) {
             });
         });
 
-        // Use setNodes with a callback to preserve internal state if needed,
-        // but here we are restructuring the graph so replacing is safer to ensure correct nodes.
-        // To avoid resetting positions of dragged nodes, we should merge.
-        // But for now, simple replacement fixes the "not loading" / infinite loop issue.
-        setNodes(newNodes);
+        // Use functional state update to preserve user-dragged positions
+        setNodes((prevNodes) => {
+            const prevNodeMap = new Map(prevNodes.map(n => [n.id, n]));
+            return newNodes.map(n => {
+                const prev = prevNodeMap.get(n.id);
+                if (prev) {
+                    // Keep the user's current position, only update data/style
+                    return {
+                        ...n,
+                        position: prev.position,
+                        positionAbsolute: prev.positionAbsolute
+                    };
+                }
+                return n;
+            });
+        });
 
         // Update edges
         const newEdges = newNodes
@@ -212,7 +223,7 @@ export function AgentStatusPanel({ plan, currentStep, logs, toolActivity }) {
     }, [agentsList, plan, logs, toolActivity, setNodes, setEdges]);
 
     return (
-        <div className="agent-panel" style={{ height: '400px', background: '#0a0a0a', borderRadius: '12px', border: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
+        <div className="agent-panel agent-panel-container" style={{ background: '#0a0a0a', borderRadius: '12px', border: '1px solid #333', display: 'flex', flexDirection: 'column' }}>
             <div style={{
                 padding: '16px',
                 borderBottom: '1px solid #222',

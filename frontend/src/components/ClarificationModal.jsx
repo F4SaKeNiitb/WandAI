@@ -1,6 +1,12 @@
 import { useState } from 'react';
 
-export function ClarificationModal({ questions, onSubmit, onCancel }) {
+export function ClarificationModal({
+    questions,
+    onSubmit,
+    onCancel,
+    title = "Clarification Needed",
+    description = "Your request needs some clarification. Please answer the following questions:"
+}) {
     const [answers, setAnswers] = useState(questions.map(() => ''));
 
     const handleAnswerChange = (index, value) => {
@@ -22,7 +28,7 @@ export function ClarificationModal({ questions, onSubmit, onCancel }) {
         <div className="modal-overlay" onClick={onCancel}>
             <div className="modal" onClick={e => e.stopPropagation()}>
                 <div className="modal-header">
-                    <h3>Clarification Needed</h3>
+                    <h3>{title}</h3>
                 </div>
                 <div className="modal-body">
                     <p style={{
@@ -30,7 +36,7 @@ export function ClarificationModal({ questions, onSubmit, onCancel }) {
                         marginBottom: '1rem',
                         fontSize: '0.875rem'
                     }}>
-                        Your request needs some clarification. Please answer the following questions:
+                        {description}
                     </p>
 
                     {questions.map((question, index) => (

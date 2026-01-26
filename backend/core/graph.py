@@ -279,7 +279,8 @@ class WorkflowManager:
             {
                 "continue": "execute_step",
                 "aggregate": "aggregate_results",
-                "error": END
+                "error": END,
+                "end": END  # Pause for step clarification
             }
         )
         
@@ -327,6 +328,43 @@ class WorkflowManager:
         success, result, error = await agent.execute_with_retry(
             state, step.id, step.description
         )
+        
+        # Check if agent is requesting step-level clarification
+        if isinstance(result, dict) and result.get("needs_clarification"):
+            questions = result.get("questions", [])
+            logger.info(f"❓ Step '{step.id}' needs clarification: {questions}")
+            
+            # Set step clarification state
+            if isinstance(state, dict):
+                state['status'] = ExecutionStatus.WAITING_STEP_CLARIFICATION.value
+                state['step_clarification_step_id'] = step.id
+                state['step_clarification_questions'] = questions
+                # Reset step status to pending so it can be re-executed
+                for s in state.get('plan', []):
+                    if s.get('id') == step.id:
+                        s['status'] = 'pending'
+                        break
+            else:
+                state.status = ExecutionStatus.WAITING_STEP_CLARIFICATION
+                state.step_clarification_step_id = step.id
+                state.step_clarification_questions = questions
+                # Reset step status
+                for s in state.plan:
+                    if s.id == step.id:
+                        s.status = StepStatus.PENDING
+                        break
+            
+            # Emit event for frontend
+            if self.event_callback:
+                await self.event_callback({
+                    "type": "step_clarification_needed",
+                    "session_id": state.session_id if hasattr(state, 'session_id') else state.get('session_id'),
+                    "step_id": step.id,
+                    "agent_type": agent_type,
+                    "questions": questions
+                })
+            
+            return state.model_dump(exclude={'conversation_history'}) if hasattr(state, 'model_dump') else state
         
         # Update state with result
         state = await self.orchestrator.handle_step_result(
@@ -418,6 +456,10 @@ class WorkflowManager:
         """Determine next step after executing a step."""
         status = get_state_attr(state, 'status', '')
         status_val = get_status_value(status)
+        
+        # Check for step clarification (pause workflow)
+        if status == ExecutionStatus.WAITING_STEP_CLARIFICATION or status_val == 'waiting_step_clarification':
+            return "end"  # Pause workflow until clarification provided
         
         if status == ExecutionStatus.ERROR or status_val == 'error':
             return "error"
@@ -600,6 +642,55 @@ Please update the plan to address these pending requests."""
             )
         
         # Re-run from planning
+        final_state = await self.graph.ainvoke(state, config=config_dict)
+        
+        return final_state
+    
+    async def resume_after_step_clarification(
+        self, 
+        session_id: str, 
+        step_id: str,
+        clarifications: list[str]
+    ) -> AgentState:
+        """
+        Resume workflow after user provides clarification for a specific step.
+        
+        Args:
+            session_id: Session ID to resume
+            step_id: ID of the step that needed clarification
+            clarifications: User's clarifying answers for this step
+            
+        Returns:
+            Final AgentState after execution
+        """
+        config_dict = {"configurable": {"thread_id": session_id}}
+        
+        # Get current state
+        current_state = await self.graph.aget_state(config_dict)
+        if current_state is None:
+            raise ValueError(f"No session found with ID: {session_id}")
+        
+        state = current_state.values
+        
+        # Store step-specific clarifications
+        if isinstance(state, dict):
+            if 'step_clarifications' not in state:
+                state['step_clarifications'] = {}
+            state['step_clarifications'][step_id] = clarifications
+            state['status'] = ExecutionStatus.EXECUTING.value
+            state['step_clarification_step_id'] = None
+            state['step_clarification_questions'] = []
+        else:
+            if not state.step_clarifications:
+                state.step_clarifications = {}
+            state.step_clarifications[step_id] = clarifications
+            state.status = ExecutionStatus.EXECUTING
+            state.step_clarification_step_id = None
+            state.step_clarification_questions = []
+        
+        logger.info(f"📝 Resuming step '{step_id}' with clarifications: {clarifications}")
+        
+        # Re-run from execute_step
         final_state = await self.graph.ainvoke(state, config=config_dict)
         
         return final_state

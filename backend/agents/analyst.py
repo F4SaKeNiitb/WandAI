@@ -177,7 +177,19 @@ Available libraries: json, datetime, random (for demo data)"""),
                     if success and output:
                         try:
                             import json
-                            chart_data = json.loads(output.strip())
+                            import re
+                            
+                            # robustness: try to find json object in output
+                            output_str = output.strip()
+                            try:
+                                chart_data = json.loads(output_str)
+                            except json.JSONDecodeError:
+                                # Try to find brace-enclosed JSON
+                                match = re.search(r'\{.*\}', output_str, re.DOTALL)
+                                if match:
+                                    chart_data = json.loads(match.group())
+                                else:
+                                    raise
                             
                             # Generate the chart
                             chart_result = await generate_chart(

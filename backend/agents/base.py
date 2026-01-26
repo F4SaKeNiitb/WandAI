@@ -60,6 +60,83 @@ class BaseAgent(ABC):
         if tools:
             self.llm = self.llm.bind_tools(tools)
     
+    async def check_task_clarity(
+        self, 
+        task_description: str, 
+        context: str
+    ) -> tuple[bool, list[str]]:
+        """
+        Check if the task description is clear enough to execute.
+        
+        Args:
+            task_description: The specific task this agent should perform
+            context: Additional context from previous steps
+            
+        Returns:
+            Tuple of (is_clear: bool, questions: list[str])
+        """
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import JsonOutputParser
+        
+        agent_val = self.agent_type.value if hasattr(self.agent_type, 'value') else str(self.agent_type)
+        
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", f"""You are a {agent_val} agent analyzing if a task is clear enough to execute.
+
+Your capabilities as a {agent_val}:
+- researcher: Web searches, data retrieval, fact-finding
+- coder: Python code execution, calculations, data processing  
+- analyst: Data analysis, chart generation, statistical analysis
+- writer: Text summarization, formatting, report generation
+
+Analyze the task and determine if you have enough information to proceed.
+Consider:
+1. Are the inputs/data sources specified or obtainable?
+2. Are the expected outputs clear?
+3. Are there ambiguous terms that could lead to wrong results?
+4. Can you reasonably infer missing details from context?
+
+IMPORTANT: Be practical. If the task is reasonably clear and you can make sensible assumptions, mark it as clear.
+Only ask for clarification if critical information is truly missing.
+
+Respond in JSON:
+{{{{
+    "is_clear": true/false,
+    "confidence": 0-10,
+    "questions": ["question1", "question2"] // Only if is_clear is false, max 2 questions
+}}}}"""),
+            ("user", """Task: {task}
+
+Context from previous steps:
+{context}
+
+Is this task clear enough for you to execute?""")
+        ])
+        
+        chain = prompt | self.llm | JsonOutputParser()
+        
+        try:
+            result = await chain.ainvoke({
+                "task": task_description,
+                "context": context[:2000]  # Limit context size
+            })
+            
+            is_clear = result.get("is_clear", True)
+            confidence = result.get("confidence", 10)
+            questions = result.get("questions", [])
+
+            # Only flag as unclear if confidence is very low
+            if confidence >= 6:
+                is_clear = True
+                questions = []
+            
+            logger.debug(f"[{agent_val}] Task clarity: {is_clear} (confidence: {confidence})")
+            return is_clear, questions
+            
+        except Exception as e:
+            logger.warning(f"[{agent_val}] Clarity check failed: {e}, assuming clear")
+            return True, []
+    
     @abstractmethod
     async def execute(
         self, 
@@ -104,6 +181,35 @@ class BaseAgent(ABC):
         
         agent_val = self.agent_type.value if hasattr(self.agent_type, 'value') else str(self.agent_type)
         logger.info(f"🚀 [{agent_val}] Starting '{step_id}': {task_description[:80]}...")
+        
+        # Check task clarity before first execution (skip if clarification already provided)
+        step_clarifications = getattr(state, 'step_clarifications', {}) or {}
+        if step_id not in step_clarifications:
+            context = self.get_context_from_state(state)
+            is_clear, questions = await self.check_task_clarity(task_description, context)
+            
+            if not is_clear and questions:
+                logger.warning(f"❓ [{agent_val}] Task unclear, requesting clarification: {questions}")
+                state.add_log(
+                    self.agent_type,
+                    f"Task needs clarification: {questions}",
+                    level="warning",
+                    step_id=step_id
+                )
+                await self.emit_event("agent_needs_clarification", state, {
+                    "step_id": step_id,
+                    "questions": questions
+                })
+                # Return special marker for workflow to handle
+                return False, {"needs_clarification": True, "questions": questions}, None
+        else:
+            # Append clarification context to task
+            clarifications = step_clarifications[step_id]
+            task_description = f"""{task_description}
+
+## User Clarifications for this step:
+{chr(10).join(f'- {c}' for c in clarifications)}"""
+            logger.info(f"📝 [{agent_val}] Using provided clarifications for '{step_id}'")
         
         for attempt in range(max_retries):
             try:

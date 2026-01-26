@@ -76,6 +76,9 @@ class SessionStatus(BaseModel):
     clarifying_questions: Optional[list[str]] = None
     error_message: Optional[str] = None
     conversation_history: Optional[list[dict]] = None
+    # Step-level clarification fields
+    step_clarification_step_id: Optional[str] = None
+    step_clarification_questions: Optional[list[str]] = None
 
 
 @router.post("/execute", response_model=ExecuteResponse)
@@ -197,6 +200,82 @@ async def provide_clarification(
         session_id=request.session_id,
         status="accepted",
         message="Clarifications received. Resuming execution."
+    )
+
+
+class StepClarifyRequest(BaseModel):
+    """Request body for providing step-level clarifications."""
+    session_id: str
+    step_id: str
+    clarifications: list[str]
+
+
+@router.post("/step-clarify", response_model=ExecuteResponse)
+async def provide_step_clarification(
+    request: StepClarifyRequest,
+    background_tasks: BackgroundTasks
+):
+    """
+    Provide clarifications for a specific step that an agent flagged as ambiguous.
+    """
+    wm = get_workflow_manager()
+    
+    # Check state in DB
+    config_dict = {"configurable": {"thread_id": request.session_id}}
+    snapshot = await wm.graph.aget_state(config_dict)
+    
+    if not snapshot or not snapshot.values:
+        if request.session_id not in sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+        state = sessions[request.session_id]
+    else:
+        state = snapshot.values
+    
+    status = get_state_status(state)
+    
+    if status != 'waiting_step_clarification':
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Session is not waiting for step clarification. Status: {status}"
+        )
+    
+    # Verify the step_id matches
+    expected_step = state.get('step_clarification_step_id') if isinstance(state, dict) else getattr(state, 'step_clarification_step_id', None)
+    if expected_step and expected_step != request.step_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Step ID mismatch. Expected: {expected_step}, got: {request.step_id}"
+        )
+    
+    # Resume workflow with step clarifications
+    async def resume_workflow():
+        try:
+            final_state = await wm.resume_after_step_clarification(
+                request.session_id,
+                request.step_id,
+                request.clarifications
+            )
+            sessions[request.session_id] = final_state
+        except Exception as e:
+            config_dict = {"configurable": {"thread_id": request.session_id}}
+            await wm.graph.aupdate_state(config_dict, {
+                "status": ExecutionStatus.ERROR,
+                "error_message": str(e)
+            })
+            
+            if isinstance(sessions.get(request.session_id), dict):
+                sessions[request.session_id]['status'] = ExecutionStatus.ERROR
+                sessions[request.session_id]['error_message'] = str(e)
+            elif request.session_id in sessions:
+                sessions[request.session_id].status = ExecutionStatus.ERROR
+                sessions[request.session_id].error_message = str(e)
+    
+    background_tasks.add_task(resume_workflow)
+    
+    return ExecuteResponse(
+        session_id=request.session_id,
+        status="accepted",
+        message=f"Step clarifications received for '{request.step_id}'. Resuming execution."
     )
 
 
@@ -345,7 +424,9 @@ async def get_session_status(session_id: str):
             final_response=state.get('final_response'),
             clarifying_questions=clarifying_questions,
             error_message=state.get('error_message'),
-            conversation_history=state.get('conversation_history', [])
+            conversation_history=state.get('conversation_history', []),
+            step_clarification_step_id=state.get('step_clarification_step_id'),
+            step_clarification_questions=state.get('step_clarification_questions', [])
         )
     else:
         # Original AgentState object handling
@@ -363,7 +444,9 @@ async def get_session_status(session_id: str):
             final_response=state.final_response,
             clarifying_questions=state.clarifying_questions if state.status == ExecutionStatus.WAITING_CLARIFICATION else None,
             error_message=state.error_message,
-            conversation_history=state.conversation_history if hasattr(state, 'conversation_history') else []
+            conversation_history=state.conversation_history if hasattr(state, 'conversation_history') else [],
+            step_clarification_step_id=state.step_clarification_step_id,
+            step_clarification_questions=state.step_clarification_questions
         )
 
 

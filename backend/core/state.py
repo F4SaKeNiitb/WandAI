@@ -37,6 +37,7 @@ class ExecutionStatus(str, Enum):
     PLANNING = "planning"
     EXECUTING = "executing"
     WAITING_CLARIFICATION = "waiting_clarification"
+    WAITING_STEP_CLARIFICATION = "waiting_step_clarification"  # Per-agent clarification
     WAITING_APPROVAL = "waiting_approval"
     COMPLETED = "completed"
     ERROR = "error"
@@ -132,6 +133,11 @@ class AgentState(BaseModel):
     
     # Dynamic refinement queue
     pending_refinement: str | None = None
+    
+    # Step-level clarification (per-agent ambiguity)
+    step_clarification_step_id: str | None = None  # Which step needs clarification
+    step_clarification_questions: list[str] = []  # Questions from the agent
+    step_clarifications: dict[str, list[str]] = {}  # step_id -> answers
     
     class Config:
         use_enum_values = True

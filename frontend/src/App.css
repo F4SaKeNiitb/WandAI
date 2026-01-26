@@ -788,3 +788,50 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-text-muted);
 }
+
+/* Responsive Adjustments */
+@media (max-width: 768px) {
+  .header {
+    flex-direction: column;
+    gap: var(--space-md);
+    padding: var(--space-md);
+  }
+
+  .connection-status {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .main-content {
+    padding: var(--space-md);
+    gap: var(--space-md);
+  }
+
+  .input-card {
+    padding: var(--space-md);
+  }
+
+  .result-content {
+    padding: var(--space-md);
+    min-height: 200px;
+  }
+}
+
+/* Component Container Classes */
+.plan-viewer-container {
+  height: 500px;
+}
+
+.agent-panel-container {
+  height: 400px;
+}
+
+@media (max-width: 768px) {
+  .plan-viewer-container {
+    height: 400px;
+  }
+
+  .agent-panel-container {
+    height: 300px;
+  }
+}

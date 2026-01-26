@@ -171,11 +171,24 @@ export function ResultDisplay({ status, result, error, artifacts }) {
                     .filter(a => a.type === 'chart' || a.type === 'image')
                     .map((artifact, index) => (
                         <div key={index} className="chart-container">
-                            {artifact.content?.image_base64 && (
+                            {artifact.content?.image_base64 ? (
                                 <img
                                     src={`data:image/png;base64,${artifact.content.image_base64}`}
                                     alt={artifact.name || 'Chart'}
                                 />
+                            ) : (
+                                <div style={{
+                                    height: '200px',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    background: 'rgba(255,255,255,0.05)',
+                                    color: 'var(--color-text-muted)',
+                                    borderRadius: 'var(--radius-md)',
+                                    fontSize: '0.875rem'
+                                }}>
+                                    Chart image not available
+                                </div>
                             )}
                             {artifact.content?.title && (
                                 <p style={{

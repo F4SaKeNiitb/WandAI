@@ -38,6 +38,19 @@ async function submitClarifications(sessionId, clarifications) {
     return response.json();
 }
 
+async function submitStepClarification(sessionId, stepId, clarifications) {
+    const response = await fetch(`${API_BASE_URL}/api/step-clarify`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            session_id: sessionId,
+            step_id: stepId,
+            clarifications
+        }),
+    });
+    return response.json();
+}
+
 async function submitApproval(sessionId, approved, modifications = null, newPlan = null) {
     const response = await fetch(`${API_BASE_URL}/api/approve`, {
         method: 'POST',
@@ -119,12 +132,14 @@ function App() {
 
     // Modal states
     const [clarificationQuestions, setClarificationQuestions] = useState(null);
+    const [stepClarificationData, setStepClarificationData] = useState(null); // { stepId, questions }
     const [showApprovalModal, setShowApprovalModal] = useState(false);
     const [showCreateAgentModal, setShowCreateAgentModal] = useState(false);
     const [isSubmittingClarification, setIsSubmittingClarification] = useState(false);
 
     // Forward ref for handleRefine to avoid circular dependencies
     const handleRefineRef = useRef(null);
+    const isUpdatingPlan = useRef(false);
 
     // Helper to update history and remove matching pending messages
     const updateHistory = useCallback((newServerHistory) => {
@@ -170,7 +185,7 @@ function App() {
             }
         }
 
-        if (data.plan) {
+        if (data.plan && !isUpdatingPlan.current) {
             setPlan(data.plan);
         }
 
@@ -187,6 +202,17 @@ function App() {
             case 'clarification_needed':
                 if (!isSubmittingClarification) {
                     setClarificationQuestions(data.questions || []);
+                    setIsLoading(false);
+                }
+                break;
+
+            case 'step_clarification_needed':
+                if (!isSubmittingClarification) {
+                    setStepClarificationData({
+                        stepId: data.step_id,
+                        questions: data.questions || [],
+                        agentType: data.agent_type
+                    });
                     setIsLoading(false);
                 }
                 break;
@@ -287,7 +313,9 @@ function App() {
                     setIsSubmittingClarification(false);
                 }
 
-                setPlan(statusData.plan || []);
+                if (!isUpdatingPlan.current) {
+                    setPlan(statusData.plan || []);
+                }
                 setCurrentStep(statusData.current_step || 0);
                 setLogs(statusData.logs || []);
                 if (statusData.conversation_history) {
@@ -307,6 +335,15 @@ function App() {
                 } else if (statusData.status === 'waiting_clarification') {
                     if (!isSubmittingClarification) {
                         setClarificationQuestions(statusData.clarifying_questions || []);
+                        setIsLoading(false);
+                    }
+                } else if (statusData.status === 'waiting_step_clarification') {
+                    if (!isSubmittingClarification) {
+                        setStepClarificationData({
+                            stepId: statusData.step_clarification_step_id,
+                            questions: statusData.step_clarification_questions || [],
+                            agentType: 'Agent' // Default, maybe enhance API to return agent type
+                        });
                         setIsLoading(false);
                     }
                 } else if (statusData.status === 'waiting_approval') {
@@ -368,6 +405,22 @@ function App() {
         }
     }, [sessionId]);
 
+    // Handle step clarification submission
+    const handleStepClarificationSubmit = useCallback(async (answers) => {
+        const stepId = stepClarificationData?.stepId;
+        setStepClarificationData(null);
+        setIsSubmittingClarification(true);
+        setIsLoading(true);
+
+        try {
+            await submitStepClarification(sessionId, stepId, answers);
+        } catch (e) {
+            setError('Failed to submit step clarifications: ' + e.message);
+            setIsLoading(false);
+            setIsSubmittingClarification(false);
+        }
+    }, [sessionId, stepClarificationData]);
+
     // Handle plan approval
     const handleApprove = useCallback(async (customPlan = null) => {
         setShowApprovalModal(false);
@@ -383,6 +436,7 @@ function App() {
 
     // Handle mid-execution plan update
     const handleUpdatePlan = useCallback(async (newPlan) => {
+        isUpdatingPlan.current = true;
         try {
             // Check if any completed steps were modified (will trigger re-execution)
             const hasCompletedChanges = plan.some((oldStep, index) => {
@@ -404,8 +458,15 @@ function App() {
             setPlan(newPlan);
 
             await submitPlanUpdate(sessionId, newPlan);
+
+            // Keep the lock for a moment to prevent immediate overwrite by lagging poll/WS
+            setTimeout(() => {
+                isUpdatingPlan.current = false;
+            }, 2000);
+
             // WebSocket/polling will eventually bring back the authoritative state (with updated statuses if re-run triggered)
         } catch (e) {
+            isUpdatingPlan.current = false;
             setError('Failed to update plan: ' + e.message);
             setIsLoading(false);
         }
@@ -565,6 +626,21 @@ function App() {
                     onSubmit={handleClarificationSubmit}
                     onCancel={() => {
                         setClarificationQuestions(null);
+                        setIsLoading(false);
+                    }}
+                />
+            )}
+
+            {stepClarificationData && stepClarificationData.questions.length > 0 && (
+                <ClarificationModal
+                    questions={stepClarificationData.questions}
+                    title="Agent Needs Help 🤖"
+                    description={`One of the agents is stuck on step '${stepClarificationData.stepId}' and needs your help to proceed:`}
+                    onSubmit={handleStepClarificationSubmit}
+                    onCancel={() => {
+                        // If cancelled, we can't really do anything but maybe clear local state
+                        // The backend is still waiting.
+                        setStepClarificationData(null);
                         setIsLoading(false);
                     }}
                 />

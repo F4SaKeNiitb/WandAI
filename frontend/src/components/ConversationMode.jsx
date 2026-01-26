@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { Lightbulb } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 export function ConversationMode({
     sessionId,
@@ -48,6 +50,13 @@ export function ConversationMode({
         }
     };
 
+    // Derived state: Show Thinking only if the LAST message is from the user
+    // This handles both "waiting for response" and "response received" (last msg becomes assistant)
+    const lastMessage = conversationHistory && conversationHistory.length > 0
+        ? conversationHistory[conversationHistory.length - 1]
+        : null;
+    const isThinking = lastMessage?.role === 'user';
+
     return (
         <div className="agent-panel glass-panel">
             <div className="panel-header">
@@ -95,8 +104,10 @@ export function ConversationMode({
                                     {entry.role === 'user' ? 'You' : 'Orchestrator'}
                                     {entry.type === 'refinement' && ' (Refinement)'}
                                 </div>
-                                <div style={{ color: 'var(--color-text-secondary)' }}>
-                                    {entry.content?.replace('[Refinement]: ', '')}
+                                <div className="result-markdown" style={{ color: 'var(--color-text-secondary)', fontSize: '0.95rem' }}>
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                        {entry.content?.replace('[Refinement]: ', '') || ''}
+                                    </ReactMarkdown>
                                 </div>
                             </div>
                         ))
@@ -113,7 +124,7 @@ export function ConversationMode({
                     )}
                 </div>
                 {/* Thinking Bubble */}
-                {(status === 'planning' || status === 'executing') && (
+                {isThinking && (
                     <div style={{
                         display: 'flex',
                         alignItems: 'center',
