@@ -31,3 +31,4 @@ pytest-asyncio
 
 # WebSocket support (included in uvicorn[standard])
 websockets
+tabulate

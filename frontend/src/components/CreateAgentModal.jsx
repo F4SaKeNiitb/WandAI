@@ -33,8 +33,18 @@ export function CreateAgentModal({ onClose, onSave }) {
             });
 
             if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.detail || 'Failed to create agent');
+                const contentType = response.headers.get("content-type");
+                if (contentType && contentType.includes("application/json")) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || 'Failed to create agent');
+                } else {
+                    const text = await response.text();
+                    console.error('Non-JSON error response:', text);
+                    if (response.status === 404) throw new Error('API endpoint not found (404)');
+                    if (response.status === 500) throw new Error('Internal Server Error (500)');
+                    if (response.status === 502 || response.status === 504) throw new Error('Backend Unreachable (Bad Gateway)');
+                    throw new Error(`Request failed with status ${response.status}`);
+                }
             }
 
             const data = await response.json();

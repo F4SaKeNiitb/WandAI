@@ -1,1 +1,6 @@
-[]
+[
+  {
+    "name": "test_agent_debug",
+    "system_prompt": "Debug prompt"
+  }
+]
