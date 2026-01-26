@@ -38,7 +38,7 @@ Guidelines:
 IMPORTANT:
 - Your code runs in a sandboxed environment
 - Available libraries: pandas, numpy, json, math, datetime, re, collections
-- Do NOT use: os, subprocess, sys, requests, or file I/O
+- Do NOT use: os, subprocess, sys, or file I/O
 - All output must be via print() statements
 
 Output your code in a properly formatted code block."""
@@ -208,4 +208,62 @@ Return the fixed code in JSON format:
                 return False, None, error
                 
         except Exception as e:
-            return False, None, str(e)
+            # Check for ImportError and try to auto-install
+            import re
+            error_str = str(e)
+            
+            # Match: "No module named 'xyz'"
+            missing_module = None
+            match = re.search(r"No module named '([^']+)'", error_str)
+            if match:
+                missing_module = match.group(1).split('.')[0]  # Get root package
+            
+            if missing_module:
+                logger.info(f"🔍 [{self.agent_type}] Detected missing module: {missing_module}")
+                state.add_log(
+                    self.agent_type,
+                    f"Missing module '{missing_module}', attempting to install...",
+                    level="warning",
+                    step_id=step_id
+                )
+                
+                from tools.dependency_manager import install_package
+                success_inst, msg_inst = install_package(missing_module)
+                
+                if success_inst:
+                     state.add_log(
+                        self.agent_type,
+                        f"Installed '{missing_module}', retrying execution...",
+                        step_id=step_id
+                    )
+                     # Retry execution immediately
+                     success3, output3, error3 = await execute_python_code(code)
+                     if success3:
+                        state.add_artifact(
+                            name=f"code_{step_id}",
+                            artifact_type="code",
+                            content={
+                                "code": code,
+                                "output": output3,
+                                "explanation": result.get("explanation", "") + f" (Auto-installed {missing_module})"
+                            },
+                            created_by=self.agent_type,
+                            step_id=step_id
+                        )
+                        await self.emit_event("code_completed", state, {
+                            "step_id": step_id,
+                            "output_preview": output3[:200] if output3 else "No output",
+                            "was_fixed": True
+                        })
+                        return True, output3, None
+                     else:
+                        error = f"Execution failed even after installing {missing_module}: {error3}"
+                else:
+                    state.add_log(
+                        self.agent_type,
+                        f"Failed to install '{missing_module}': {msg_inst}",
+                        level="error",
+                        step_id=step_id
+                    )
+            
+            return False, None, str(error or e)

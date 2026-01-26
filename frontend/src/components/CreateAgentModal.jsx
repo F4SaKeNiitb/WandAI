@@ -19,11 +19,13 @@ export function CreateAgentModal({ onClose, onSave }) {
         // Format name to snake_case for ID
         const agentId = name.trim().toLowerCase().replace(/\s+/g, '_');
 
+        const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '');
+
         setIsSubmitting(true);
         setError(null);
 
         try {
-            const response = await fetch('/api/agents', {
+            const response = await fetch(`${API_BASE_URL}/api/agents`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
