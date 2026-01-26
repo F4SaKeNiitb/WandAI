@@ -1,170 +1,90 @@
 # 🪄 WandAI - Multi-Agent AI Orchestration System
 
-A powerful system that accepts high-level business requests in plain language, uses multiple specialized AI agents to break down tasks, execute subtasks, and return structured results with real-time visibility.
+## 🏗️ Design Decisions
 
-## ✨ Features
+The system was designed with a modular, agentic architecture to handle complex, multi-step requests.
 
-- **Intelligent Planning**: Automatically decomposes complex requests into actionable steps
-- **Specialized Agents**: 
-  - 🔍 **Researcher** - Web searches and data retrieval
-  - 💻 **Coder** - Python code execution with self-correction
-  - 📊 **Analyst** - Data analysis and chart generation
-  - ✍️ **Writer** - Summarization and report formatting
-- **Real-time Updates**: WebSocket-based progress streaming
-- **Ambiguity Handling**: Asks clarifying questions for vague requests
-- **Human-in-the-Loop**: Optional plan approval before execution
+### 1. Orchestration via LangGraph
+Instead of a simple linear chain, we used **LangGraph** to model the workflow as a stateful graph. This allows for:
+- **Cyclic Execution**: Agents can loop back (e.g., retrying failed steps).
+- **Dynamic Routing**: The Orchestrator decides execution order based on dependencies.
+- **Human-in-the-Loop**: The graph can pause for user approval or clarification.
 
-## 🏗️ Architecture
+### 2. The "Blackboard" State Pattern
+We use a centralized `AgentState` object that all agents read from and write to. This avoids passing complex outputs directly between agents and provides a single source of truth for the Frontend to render.
+- **Artifacts**: Files (charts, scripts) are stored in a unified ID-based dictionary.
+- **Logs**: A shared append-only log allows real-time visibility into every agent's thought process.
 
-```
-┌─────────────────┐     ┌──────────────────────────────────────┐
-│    Frontend     │────▶│              Backend                 │
-│  (React/Vite)   │◀────│           (FastAPI)                  │
-└─────────────────┘ WS  └──────────────────────────────────────┘
-                              │
-                              ▼
-                    ┌─────────────────┐
-                    │   Orchestrator  │ ◀── The Hub
-                    │   (LangGraph)   │
-                    └────────┬────────┘
-                             │
-           ┌─────────┬───────┼───────┬─────────┐
-           ▼         ▼       ▼       ▼         ▼
-       Researcher  Coder  Analyst  Writer   [Tools]
-```
+### 3. Separation of Planning & Execution
+- **Orchestrator Agent**: Acts as the project manager. It does *not* execute tasks but breaks them down into a `Plan` (list of steps with dependencies).
+- **Specialized Agents**: (Researcher, Coder, Analyst) are laser-focused on execution. They don't worry about the bigger picture, just their assigned `step_id`.
 
-## 🚀 Quick Start
+### 4. Hybrid Frontend/Backend
+- **Backend (FastAPI)**: Handles the heavy lifting of agent orchestration and LLM interaction. Async Python is ideal for I/O bound LLM calls.
+- **Frontend (React + Vite)**: Provides a responsive, "Mission Control" style interface. We chose **WebSocket** for real-time updates so the user isn't staring at a spinner for 2 minutes.
 
-### Prerequisites
+---
 
-- Python 3.11+
-- Node.js 18+
-- OpenAI API key (or compatible LLM provider)
-- Tavily API key (optional, for web search)
+## ⚖️ Trade-offs (24h Constraint)
+
+Due to the limited development window, several trade-offs were made:
+
+- **In-Memory Persistence**: We use `MemorySaver` for graph state.
+  - *Consequence*: If the backend restarts, all session history and artifacts are lost.
+  - *Ideal Approach*: A Postgres/Redis backed checkpointer for long-term persistence.
+- **Sandboxed Execution**: Code execution uses a lightweight `exec()` restriction.
+  - *Consequence*: It blocks dangerous imports (os, sys) but isn't as secure as a true containerized sandbox (e.g., Docker-in-Docker or Firecracker).
+- **No User Authentication**: The system assumes a single tenant (or trusted environment).
+  - *Consequence*: No multi-user separation or saved user profiles.
+- **Generic System Prompts**: Agents use robust but static system prompts.
+  - *Consequence*: They work well for general tasks/coding but aren't fine-tuned for niche domains.
+
+---
+
+## 🚀 How to Run & Test
 
 ### Backend Setup
 
-```bash
-cd backend
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure environment
-cp .env.example .env
-# Edit .env and add your API keys
-
-# Run the server
-uvicorn main:app --reload --port 8000
-```
+1. **Navigate to backend**:
+   ```bash
+   cd backend
+   ```
+2. **Install Dependencies**:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # Windows: venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
+3. **Configure Environment**:
+   - Copy `.env.example` to `.env`.
+   - Add your `OPENAI_API_KEY` (or Gemini/Anthropic keys if supported).
+   - Add `TAVILY_API_KEY` for web search capabilities.
+4. **Run Server**:
+   ```bash
+   uvicorn main:app --reload --port 8000
+   ```
+   *Note: Restart this process if you modify backend code.*
 
 ### Frontend Setup
 
-```bash
-cd frontend
+1. **Navigate to frontend**:
+   ```bash
+   cd frontend
+   ```
+2. **Install Dependencies**:
+   ```bash
+   npm install
+   ```
+3. **Run Development Server**:
+   ```bash
+   npm run dev
+   ```
+4. **Access UI**:
+   - Open [http://localhost:5173](http://localhost:5173) in your browser.
 
-# Install dependencies
-npm install
+### Testing the System
 
-# Run development server
-npm run dev
-```
-
-The application will be available at:
-- Frontend: http://localhost:5173
-- Backend API: http://localhost:8000
-- API Docs: http://localhost:8000/docs
-
-## 📡 API Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| POST | `/api/execute` | Submit a new business request |
-| POST | `/api/clarify` | Provide clarification answers |
-| POST | `/api/approve` | Approve or modify execution plan |
-| GET | `/api/status/{session_id}` | Get session status |
-| GET | `/api/sessions` | List all active sessions |
-| WS | `/ws/{session_id}` | Real-time updates for a session |
-
-## 🔧 Configuration
-
-Edit `backend/.env`:
-
-```env
-# LLM Provider
-OPENAI_API_KEY=your_key_here
-
-# Search API (optional)
-TAVILY_API_KEY=your_key_here
-
-# Agent Settings
-MAX_RETRIES=3
-STEP_TIMEOUT_SECONDS=60
-CLARITY_THRESHOLD=8
-```
-
-## 📝 Example Requests
-
-Try these example requests:
-
-1. **Data Analysis**: "Get Tesla's stock price for the last week and plot it"
-2. **Calculation**: "Calculate compound interest on $10,000 at 5% for 10 years"
-3. **Research**: "What are the top AI trends in 2024?"
-4. **Code Generation**: "Write a Python script to analyze CSV data"
-
-## 🏛️ Project Structure
-
-```
-WandAI/
-├── backend/
-│   ├── main.py              # FastAPI entry point
-│   ├── config.py            # Configuration management
-│   ├── core/
-│   │   ├── state.py         # Shared state schema
-│   │   ├── orchestrator.py  # Main orchestrator
-│   │   └── graph.py         # LangGraph workflow
-│   ├── agents/
-│   │   ├── base.py          # Base agent class
-│   │   ├── researcher.py    # Research agent
-│   │   ├── coder.py         # Code execution agent
-│   │   ├── analyst.py       # Analysis agent
-│   │   └── writer.py        # Writing agent
-│   ├── tools/
-│   │   ├── search.py        # Web search tool
-│   │   ├── code_executor.py # Sandboxed Python executor
-│   │   └── chart_generator.py
-│   └── api/
-│       ├── routes.py        # REST endpoints
-│       └── websocket.py     # WebSocket handlers
-│
-└── frontend/
-    ├── index.html
-    ├── package.json
-    └── src/
-        ├── App.jsx          # Main application
-        ├── App.css          # Styles
-        ├── hooks/
-        │   └── useWebSocket.js
-        └── components/
-            ├── RequestInput.jsx
-            ├── AgentStatusPanel.jsx
-            ├── PlanViewer.jsx
-            ├── ResultDisplay.jsx
-            ├── ClarificationModal.jsx
-            └── LogsPanel.jsx
-```
-
-## 🛡️ Safety Features
-
-- Sandboxed code execution with restricted imports
-- Timeout enforcement for all agent operations  
-- Retry logic with self-correction
-- Error feedback loops for automatic recovery
-
-## 📄 License
-
-MIT License
+1. **Basic Test**: Input "Calculate the 10th Fibonacci number" to test the Coder agent.
+2. **Research Test**: Input "Who won the Super Bowl in 2024?" to test the Researcher (requires Tavily key).
+3. **Graph Test**: Input "Plot a sine wave" to test Analyst + Chart generation.
+4. **Refinement Test**: After a result is generated, use the chat box to ask "Change the color to red" to test the refinement loop.
