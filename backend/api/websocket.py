@@ -56,9 +56,10 @@ class ConnectionManager:
             for connection in self.active_connections[session_id]:
                 try:
                     await connection.send_json(message)
-                except:
+                except Exception as e:
+                    logger.warning(f"WebSocket send failed: {e}")
                     disconnected.add(connection)
-            
+
             # Clean up disconnected
             for ws in disconnected:
                 self.active_connections[session_id].discard(ws)
@@ -69,9 +70,10 @@ class ConnectionManager:
         for connection in self.all_connections:
             try:
                 await connection.send_json(message)
-            except:
+            except Exception as e:
+                logger.warning(f"WebSocket broadcast failed: {e}")
                 disconnected.add(connection)
-        
+
         # Clean up disconnected
         for ws in disconnected:
             self.all_connections.discard(ws)
@@ -137,6 +139,7 @@ async def websocket_global(websocket: WebSocket):
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
+        logger.error(f"WebSocket session error: {e}")
         manager.disconnect(websocket)
 
 
@@ -172,6 +175,7 @@ async def websocket_session(websocket: WebSocket, session_id: str):
     except WebSocketDisconnect:
         manager.disconnect(websocket, session_id)
     except Exception as e:
+        logger.error(f"WebSocket session error: {e}")
         manager.disconnect(websocket, session_id)
 
 

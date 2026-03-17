@@ -13,6 +13,7 @@ import uvicorn
 from config import config
 from api.routes import router as api_router, get_workflow_manager
 from api.websocket import router as ws_router, get_event_callback
+from a2a.routes import router as a2a_router
 from core.logging import (
     setup_logging,
     get_logger,
@@ -40,15 +41,30 @@ async def lifespan(app: FastAPI):
     logger.info(f"Search API: {'Configured' if config.search.tavily_api_key else 'Not configured'}")
     logger.debug(f"Debug mode: {config.app.debug}")
     
+    # Initialize OpenTelemetry tracing
+    from observability.tracing import init_tracing
+    tracing_mgr = init_tracing(
+        enabled=config.tracing.enabled,
+        exporter=config.tracing.exporter,
+        endpoint=config.tracing.endpoint,
+    )
+    logger.info(f"Tracing: {'enabled (' + config.tracing.exporter + ')' if config.tracing.enabled else 'disabled'}")
+
     # Initialize workflow manager with event callback
     from core.graph import WorkflowManager
     from api.routes import workflow_manager
     import api.routes as routes_module
-    
+
     routes_module.workflow_manager = WorkflowManager(event_callback=get_event_callback())
     await routes_module.workflow_manager.initialize()
-    
+
+    # Initialize A2A task manager with the workflow manager
+    from a2a.task_manager import A2ATaskManager
+    import a2a.routes as a2a_routes_module
+    a2a_routes_module.task_manager = A2ATaskManager(workflow_manager=routes_module.workflow_manager)
+
     logger.info("✅ System initialized successfully")
+    logger.info("🔗 A2A Protocol: /a2a/{agent}/.well-known/agent.json")
     logger.info(f"📡 API: http://{config.app.host}:{config.app.port}")
     logger.info(f"📚 Docs: http://{config.app.host}:{config.app.port}/docs")
 
@@ -63,6 +79,8 @@ async def lifespan(app: FastAPI):
     
     # Shutdown
     logger.info("👋 Shutting down...")
+    if tracing_mgr:
+        tracing_mgr.shutdown()
     if routes_module.workflow_manager:
         await routes_module.workflow_manager.cleanup()
 
@@ -126,6 +144,7 @@ app.add_middleware(
 # Include routers
 app.include_router(api_router)
 app.include_router(ws_router)
+app.include_router(a2a_router)
 
 
 @app.get("/", tags=["health"])
@@ -141,7 +160,15 @@ async def root():
             "clarify": "/api/clarify",
             "approve": "/api/approve",
             "status": "/api/status/{session_id}",
-            "websocket": "/ws/{session_id}"
+            "websocket": "/ws/{session_id}",
+            "a2a_agents": "/a2a/.well-known/agents.json",
+            "a2a_endpoint": "/a2a/{agent}",
+            "documents_upload": "/api/documents/upload",
+            "documents_list": "/api/documents/{session_id}",
+            "usage": "/api/usage/{session_id}",
+            "memory_search": "/api/memory/search",
+            "evaluation": "/api/evaluation/{session_id}",
+            "evaluation_metrics": "/api/evaluation/metrics",
         }
     }
 

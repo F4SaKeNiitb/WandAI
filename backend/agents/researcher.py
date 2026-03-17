@@ -9,7 +9,8 @@ from langchain_core.output_parsers import JsonOutputParser
 
 from agents.base import BaseAgent
 from core.state import AgentState, AgentType
-from tools.search import search_web
+from core.state_utils import add_log, add_artifact
+from tools.search import search_web as search_web_direct
 
 
 class ResearcherAgent(BaseAgent):
@@ -32,9 +33,11 @@ Guidelines:
 2. Prefer authoritative sources (official websites, major news outlets)
 3. Extract specific data points, not just general information
 4. Include source URLs for verification
-5. If information is not found, clearly state that
+5. If information is not found, you MUST clearly state "DATA_NOT_FOUND:" followed by what could not be found
+6. NEVER fabricate, simulate, or invent data. Only report what you actually found in search results.
+7. When the task requires numerical data (e.g., GDP, population, prices), extract the EXACT numbers from search results. If exact numbers are not available, say so explicitly.
 
-Output your findings in a structured format."""
+CRITICAL: If you cannot find the specific data requested, DO NOT make up approximate numbers. Instead, clearly state what was found and what was missing. Downstream agents depend on your accuracy."""
 
     async def execute(
         self,
@@ -54,7 +57,12 @@ Output your findings in a structured format."""
         
         # Get context from previous steps
         context = self.get_context_from_state(state)
-        
+
+        # Query RAG pipeline for uploaded document context
+        rag_context = self.get_rag_context(state, task_description)
+        if rag_context:
+            context = f"{context}\n\n{rag_context}"
+
         # First, determine what to search for
         planning_prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a research planning assistant. Given a research task, 
@@ -79,13 +87,12 @@ Generate 1-3 focused search queries."""),
             })
             queries = plan.get("queries", [task_description])
             
-            state.add_log(
-                self.agent_type,
+            add_log(state, self.agent_type,
                 f"Searching with {len(queries)} queries",
                 step_id=step_id
             )
             
-            # Execute searches
+            # Execute searches — use MCP tool if available, else direct import
             all_results = []
             for query in queries[:3]:  # Limit to 3 queries
                 await self.emit_event("searching", state, {
@@ -93,8 +100,17 @@ Generate 1-3 focused search queries."""),
                     "query": query,
                     "tool": "web_search_api"
                 })
-                
-                results = await search_web(query)
+
+                if self.mcp_manager:
+                    try:
+                        results = await self.mcp_manager.call_tool("search_web", {"query": query})
+                        if isinstance(results, str):
+                            import json as _json
+                            results = _json.loads(results)
+                    except Exception:
+                        results = await search_web_direct(query)
+                else:
+                    results = await search_web_direct(query)
                 if results:
                     all_results.extend(results)
             
@@ -111,10 +127,16 @@ Task: {task}
 Search Results:
 {results}
 
+IMPORTANT RULES:
+- ONLY report data that is explicitly present in the search results above.
+- If the search results do not contain the specific data requested, start your response with "DATA_NOT_FOUND:" and explain what is missing.
+- NEVER invent, estimate, or simulate numbers that are not in the search results.
+- When numerical data IS found, present it in a clear structured format (e.g., tables, lists with exact values).
+
 Provide a structured summary with:
-1. Key findings
-2. Relevant data points
-3. Source citations""")
+1. Key findings (with exact data points extracted from results)
+2. Data quality assessment (is the data complete? any gaps?)
+3. Source citations with URLs""")
             ])
             
             results_text = "\n\n".join([
@@ -127,9 +149,10 @@ Provide a structured summary with:
                 "task": task_description,
                 "results": results_text
             })
+            self._last_usage = getattr(response, 'usage_metadata', None)
             
             # Store as artifact
-            artifact_id = state.add_artifact(
+            artifact_id = add_artifact(state,
                 name=f"research_{step_id}",
                 artifact_type="text",
                 content=response.content,

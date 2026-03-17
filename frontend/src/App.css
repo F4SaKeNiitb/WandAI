@@ -425,6 +425,16 @@ body {
   padding: 0;
 }
 
+/* Streaming cursor */
+.streaming-cursor {
+    animation: blink 1s step-end infinite;
+    color: var(--color-accent-primary);
+}
+
+@keyframes blink {
+    50% { opacity: 0; }
+}
+
 /* Sidebar - Agent Status */
 .sidebar {
   display: flex;

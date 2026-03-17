@@ -14,104 +14,86 @@ import { StepDetailModal } from './components/StepDetailModal';
 // API basic configuration
 const API_BASE_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '');
 
+// API helper with timeout and response.ok check
+async function apiFetch(url, options = {}) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), options.timeout || 10000);
+    try {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        if (!response.ok) {
+            const text = await response.text().catch(() => response.statusText);
+            throw new Error(`API error (${response.status}): ${text}`);
+        }
+        return response.json();
+    } finally {
+        clearTimeout(timeoutId);
+    }
+}
+
 // API calls
 async function submitRequest(request) {
-    const response = await fetch(`${API_BASE_URL}/api/execute`, {
+    return apiFetch(`${API_BASE_URL}/api/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            request,
-            require_approval: false
-        }),
+        body: JSON.stringify({ request, require_approval: false }),
     });
-    return response.json();
 }
 
 async function submitClarifications(sessionId, clarifications) {
-    const response = await fetch(`${API_BASE_URL}/api/clarify`, {
+    return apiFetch(`${API_BASE_URL}/api/clarify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            session_id: sessionId,
-            clarifications
-        }),
+        body: JSON.stringify({ session_id: sessionId, clarifications }),
     });
-    return response.json();
 }
 
 async function submitStepClarification(sessionId, stepId, clarifications) {
-    const response = await fetch(`${API_BASE_URL}/api/step-clarify`, {
+    return apiFetch(`${API_BASE_URL}/api/step-clarify`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            session_id: sessionId,
-            step_id: stepId,
-            clarifications
-        }),
+        body: JSON.stringify({ session_id: sessionId, step_id: stepId, clarifications }),
     });
-    return response.json();
 }
 
 async function submitApproval(sessionId, approved, modifications = null, newPlan = null) {
-    const response = await fetch(`${API_BASE_URL}/api/approve`, {
+    return apiFetch(`${API_BASE_URL}/api/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            session_id: sessionId,
-            approved,
-            modifications,
-            plan: newPlan
-        }),
+        body: JSON.stringify({ session_id: sessionId, approved, modifications, plan: newPlan }),
     });
-    return response.json();
 }
 
 async function submitPlanUpdate(sessionId, plan) {
-    const response = await fetch(`${API_BASE_URL}/api/plan`, {
+    return apiFetch(`${API_BASE_URL}/api/plan`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            session_id: sessionId,
-            plan
-        }),
+        body: JSON.stringify({ session_id: sessionId, plan }),
     });
-    return response.json();
 }
 
 async function getSessionStatus(sessionId) {
-    const response = await fetch(`${API_BASE_URL}/api/status/${sessionId}`);
-    return response.json();
+    return apiFetch(`${API_BASE_URL}/api/status/${sessionId}`);
 }
 
 // Live Conversation & Refinement API calls
 async function sendChatMessage(sessionId, message) {
-    const response = await fetch(`${API_BASE_URL}/api/chat`, {
+    return apiFetch(`${API_BASE_URL}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            session_id: sessionId,
-            message
-        }),
+        body: JSON.stringify({ session_id: sessionId, message }),
     });
-    return response.json();
 }
 
 async function sendRefinement(sessionId, refinement, keepArtifacts = true) {
-    const response = await fetch(`${API_BASE_URL}/api/refine`, {
+    return apiFetch(`${API_BASE_URL}/api/refine`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            session_id: sessionId,
-            refinement,
-            keep_artifacts: keepArtifacts
-        }),
+        body: JSON.stringify({ session_id: sessionId, refinement, keep_artifacts: keepArtifacts }),
     });
-    return response.json();
 }
 
 async function getConversationHistory(sessionId) {
-    const response = await fetch(`${API_BASE_URL}/api/conversation/${sessionId}`);
-    return response.json();
+    return apiFetch(`${API_BASE_URL}/api/conversation/${sessionId}`);
 }
 
 function App() {
@@ -126,6 +108,8 @@ function App() {
     const [error, setError] = useState(null);
     const [artifacts, setArtifacts] = useState([]);
     const [toolActivity, setToolActivity] = useState(null);
+    const [streamingText, setStreamingText] = useState('');
+    const [isStreaming, setIsStreaming] = useState(false);
 
     // Conversation state
     const [conversationHistory, setConversationHistory] = useState([]); // Server state
@@ -201,6 +185,15 @@ function App() {
 
         // Handle specific events
         switch (type) {
+            case 'streaming_token':
+                setStreamingText(prev => prev + data.token);
+                setIsStreaming(true);
+                break;
+
+            case 'streaming_complete':
+                setIsStreaming(false);
+                break;
+
             case 'clarification_needed':
                 if (!isSubmittingClarification) {
                     setClarificationQuestions(data.questions || []);
@@ -227,6 +220,8 @@ function App() {
             case 'execution_completed':
             case 'refinement_completed':
                 setIsLoading(false);
+                setStreamingText('');
+                setIsStreaming(false);
                 // Fetch final result
                 if (sessionId) {
                     getSessionStatus(sessionId).then(res => {
@@ -262,6 +257,16 @@ function App() {
             case 'refinement_started':
                 setIsLoading(true);
                 setStatus('planning');
+                break;
+
+            case 'data_quality_warning':
+                // Alert user about data quality issues
+                setLogs(prev => [...prev, {
+                    agent_type: 'orchestrator',
+                    message: `Data quality warning: ${data.message || 'A step could not retrieve the requested data.'}`,
+                    level: 'warning',
+                    timestamp: new Date().toISOString()
+                }]);
                 break;
 
             case 'step_failed':
@@ -372,6 +377,8 @@ function App() {
         setCurrentStep(0);
         setStatus('pending');
         setIsSubmittingClarification(false);
+        setStreamingText('');
+        setIsStreaming(false);
         setConversationHistory([]);
         setPendingMessages([]); // Clear pending
         clearMessages();
@@ -586,6 +593,8 @@ function App() {
                         result={result}
                         error={error}
                         artifacts={artifacts}
+                        streamingText={streamingText}
+                        isStreaming={isStreaming}
                     />
                 </div>
 

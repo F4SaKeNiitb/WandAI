@@ -8,6 +8,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 from agents.base import BaseAgent
 from core.state import AgentState, AgentType
+from core.state_utils import get_state_attr, get_artifact_attr, add_log, add_artifact
 
 
 class WriterAgent(BaseAgent):
@@ -61,28 +62,30 @@ Output formats you can create:
         
         # Collect all relevant artifacts for summarization
         artifacts_content = []
-        for artifact_id, artifact in state.artifacts.items():
-            if artifact.type in ["text", "data"]:
+        artifacts = get_state_attr(state, 'artifacts', {})
+        for artifact_id, artifact in artifacts.items():
+            a_type = get_artifact_attr(artifact, 'type', 'text')
+            a_name = get_artifact_attr(artifact, 'name', artifact_id)
+            a_content = get_artifact_attr(artifact, 'content', '')
+            if a_type in ["text", "data"]:
                 artifacts_content.append({
-                    "name": artifact.name,
-                    "type": artifact.type,
-                    "content": str(artifact.content)[:2000]  # Limit content length
+                    "name": a_name,
+                    "type": a_type,
+                    "content": str(a_content)[:2000]
                 })
-            elif artifact.type == "code":
-                content = artifact.content
-                if isinstance(content, dict):
+            elif a_type == "code":
+                if isinstance(a_content, dict):
                     artifacts_content.append({
-                        "name": artifact.name,
+                        "name": a_name,
                         "type": "code_output",
-                        "content": content.get("output", "")[:1000]
+                        "content": a_content.get("output", "")[:1000]
                     })
-            elif artifact.type == "chart":
-                content = artifact.content
-                if isinstance(content, dict):
+            elif a_type == "chart":
+                if isinstance(a_content, dict):
                     artifacts_content.append({
-                        "name": artifact.name,
+                        "name": a_name,
                         "type": "chart",
-                        "content": f"Chart titled: {content.get('title', 'Untitled')}"
+                        "content": f"Chart titled: {a_content.get('title', 'Untitled')}"
                     })
         
         # Determine the writing style/format needed
@@ -105,7 +108,8 @@ Instructions:
 2. Use markdown formatting (headers, bullets, bold for emphasis)
 3. Include key insights and important numbers
 4. Reference any charts or visualizations created
-5. Keep the tone professional but accessible""")
+5. Keep the tone professional but accessible
+6. CRITICAL: If any of the step results or artifacts contain "DATA_NOT_FOUND" or "ERROR_MISSING_DATA", you MUST clearly inform the reader that the requested data could not be retrieved. NEVER fill in made-up numbers to replace missing data.""")
         ])
         
         try:
@@ -115,24 +119,24 @@ Instructions:
                 for a in artifacts_content
             ]) if artifacts_content else "No artifacts available."
             
-            state.add_log(
-                self.agent_type,
+            add_log(state, self.agent_type,
                 f"Writing content based on {len(artifacts_content)} artifacts",
                 step_id=step_id
             )
-            
+
             chain = writing_prompt | self.llm
             result = await chain.ainvoke({
                 "task": task_description,
-                "original_request": state.user_request,
+                "original_request": get_state_attr(state, 'user_request', ''),
                 "context": context,
                 "artifacts": artifacts_text
             })
-            
+            self._last_usage = getattr(result, 'usage_metadata', None)
+
             written_content = result.content
             
             # Store as artifact
-            state.add_artifact(
+            add_artifact(state,
                 name=f"document_{step_id}",
                 artifact_type="text",
                 content=written_content,

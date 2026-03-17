@@ -5,8 +5,6 @@ A flexible agent implementation that can be configured with a custom identity an
 
 from typing import Any
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
-
 from agents.base import BaseAgent
 from core.state import AgentState
 
@@ -15,21 +13,22 @@ class GenericAgent(BaseAgent):
     A generic agent that operates based on a custom name and system prompt.
     """
     
-    def __init__(self, name: str, system_prompt: str, event_callback=None):
+    def __init__(self, name: str, system_prompt: str, event_callback=None, **kwargs):
         """
         Initialize the custom agent.
-        
+
         Args:
             name: The internal ID/name of the agent (e.g., 'social_media_manager')
             system_prompt: The instructions defining the agent's behavior
             event_callback: Async callback for events
+            **kwargs: Additional BaseAgent params (rag_pipeline, memory, etc.)
         """
         self.custom_name = name
         # Initialize generic base
-        super().__init__(event_callback)
+        super().__init__(event_callback, **kwargs)
         # Override the agent_type and prompt AFTER init
         # We use the custom name as the agent_type string
-        self.agent_type = name 
+        self.agent_type = name
         self.system_prompt = system_prompt
         
     async def execute(
@@ -54,14 +53,13 @@ Context:
 Execute the task and provide the result.""")
             ])
             
-            chain = prompt | self.llm | StrOutputParser()
-            
-            response = await chain.ainvoke({
+            raw_response = await (prompt | self.llm).ainvoke({
                 "task": task_description,
                 "context": context
             })
-            
-            return True, response, None
+            self._last_usage = getattr(raw_response, 'usage_metadata', None)
+
+            return True, raw_response.content, None
             
         except Exception as e:
             return False, None, str(e)

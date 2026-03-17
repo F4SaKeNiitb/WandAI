@@ -16,6 +16,11 @@ logger = get_logger('API')
 
 router = APIRouter(prefix="/api", tags=["orchestration"])
 
+
+@router.get("/health")
+async def health():
+    return {"status": "ok"}
+
 # In-memory session store (would use Redis/database in production)
 sessions: dict[str, AgentState] = {}
 workflow_manager: WorkflowManager = None
@@ -79,6 +84,9 @@ class SessionStatus(BaseModel):
     # Step-level clarification fields
     step_clarification_step_id: Optional[str] = None
     step_clarification_questions: Optional[list[str]] = None
+    # Token usage & evaluation
+    token_usage: Optional[dict] = None
+    evaluation_scores: Optional[dict] = None
 
 
 @router.post("/execute", response_model=ExecuteResponse)
@@ -88,14 +96,20 @@ async def execute_request(
 ):
     """
     Submit a new business request for execution.
-    
+
     The request will be processed asynchronously. Use the session_id
     to track progress via WebSocket or the status endpoint.
     """
     session_id = request.session_id or str(uuid.uuid4())
-    
+
     wm = get_workflow_manager()
-    
+
+    # Guardrails: validate input before processing
+    if wm.guardrails_manager:
+        is_valid, issues = wm.guardrails_manager.check_input(request.request)
+        if not is_valid:
+            raise HTTPException(status_code=400, detail={"guardrail_violations": issues})
+
     # Store initial state
     from core.state import create_initial_state
     initial_state = create_initial_state(request.request)
@@ -413,6 +427,17 @@ async def get_session_status(session_id: str):
         if status_val == ExecutionStatus.WAITING_CLARIFICATION or status_val == 'waiting_clarification':
             clarifying_questions = state.get('clarifying_questions', [])
         
+        # Token usage from tracker
+        token_usage = None
+        if wm.token_tracker:
+            usage = wm.token_tracker.get_session_usage(session_id)
+            if usage["call_count"] > 0:
+                token_usage = {
+                    "total_input_tokens": usage["total_input_tokens"],
+                    "total_output_tokens": usage["total_output_tokens"],
+                    "estimated_cost": usage["estimated_cost"],
+                }
+
         return SessionStatus(
             session_id=session_id,
             status=str(status_val),
@@ -426,10 +451,22 @@ async def get_session_status(session_id: str):
             error_message=state.get('error_message'),
             conversation_history=state.get('conversation_history', []),
             step_clarification_step_id=state.get('step_clarification_step_id'),
-            step_clarification_questions=state.get('step_clarification_questions', [])
+            step_clarification_questions=state.get('step_clarification_questions', []),
+            token_usage=token_usage or state.get('token_usage'),
+            evaluation_scores=state.get('evaluation_scores'),
         )
     else:
         # Original AgentState object handling
+        token_usage = None
+        if wm.token_tracker:
+            usage = wm.token_tracker.get_session_usage(session_id)
+            if usage["call_count"] > 0:
+                token_usage = {
+                    "total_input_tokens": usage["total_input_tokens"],
+                    "total_output_tokens": usage["total_output_tokens"],
+                    "estimated_cost": usage["estimated_cost"],
+                }
+
         return SessionStatus(
             session_id=session_id,
             status=state.status.value if hasattr(state.status, 'value') else str(state.status),
@@ -446,7 +483,9 @@ async def get_session_status(session_id: str):
             error_message=state.error_message,
             conversation_history=state.conversation_history if hasattr(state, 'conversation_history') else [],
             step_clarification_step_id=state.step_clarification_step_id,
-            step_clarification_questions=state.step_clarification_questions
+            step_clarification_questions=state.step_clarification_questions,
+            token_usage=token_usage or (state.token_usage if hasattr(state, 'token_usage') else None),
+            evaluation_scores=state.evaluation_scores if hasattr(state, 'evaluation_scores') else None,
         )
 
 
@@ -546,15 +585,16 @@ class CustomAgentRequest(BaseModel):
 
 @router.post("/agents")
 async def create_custom_agent(request: CustomAgentRequest):
-    """
-    Create or update a custom agent.
-    """
+    """Create or update a custom agent."""
+    if len(request.name) > 50:
+        raise HTTPException(status_code=400, detail="Agent name must be 50 characters or less")
+    if len(request.system_prompt) > 5000:
+        raise HTTPException(status_code=400, detail="System prompt must be 5000 characters or less")
+
     wm = get_workflow_manager()
-    
     success, message = wm.register_custom_agent(request.name, request.system_prompt)
     if not success:
         raise HTTPException(status_code=400, detail=message)
-        
     return {"message": "Agent registered successfully", "id": request.name}
 
 
@@ -571,21 +611,54 @@ async def delete_custom_agent(agent_id: str):
         
     return {"message": "Agent deleted successfully", "id": agent_id}
 
+def _validate_plan(plan: list[dict]):
+    """Validate plan structure before applying updates."""
+    ids = set()
+    for step in plan:
+        sid = step.get('id')
+        if not sid:
+            raise ValueError("Step missing 'id'")
+        if sid in ids:
+            raise ValueError(f"Duplicate step id: {sid}")
+        ids.add(sid)
+    for step in plan:
+        for dep in step.get('dependencies', []):
+            if dep not in ids:
+                raise ValueError(f"Unknown dependency: {dep}")
+    # Cycle detection via DFS
+    adj = {step['id']: step.get('dependencies', []) for step in plan}
+    visited = set()
+    in_stack = set()
+    def has_cycle(node):
+        visited.add(node)
+        in_stack.add(node)
+        for dep in adj.get(node, []):
+            if dep in in_stack:
+                return True
+            if dep not in visited and has_cycle(dep):
+                return True
+        in_stack.discard(node)
+        return False
+    for node in adj:
+        if node not in visited:
+            if has_cycle(node):
+                raise ValueError("Circular dependency detected in plan")
+
+
 @router.post("/plan", response_model=ExecuteResponse)
-async def update_plan_midway(
-    request: PlanUpdateRequest
-):
-    """
-    Update the execution plan mid-flight.
-    """
+async def update_plan_midway(request: PlanUpdateRequest):
+    """Update the execution plan mid-flight."""
     wm = get_workflow_manager()
     try:
+        _validate_plan(request.plan)
         await wm.update_plan(request.session_id, request.plan)
         return ExecuteResponse(
             session_id=request.session_id,
             status="accepted",
             message="Plan updated successfully."
         )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -879,4 +952,112 @@ async def get_conversation_history(session_id: str):
         "conversation": conversation,
         "artifacts_count": len(state.artifacts)
     }
+
+
+# ============================================================
+# RAG Pipeline — Document Upload & Retrieval
+# ============================================================
+
+from fastapi import UploadFile, File, Form
+
+
+@router.post("/documents/upload")
+async def upload_document(
+    file: UploadFile = File(...),
+    session_id: str = Form(...),
+):
+    """Upload a document for RAG — PDF, TXT, MD, CSV."""
+    wm = get_workflow_manager()
+    if not wm.rag_pipeline:
+        raise HTTPException(status_code=501, detail="RAG pipeline not available (chromadb not installed)")
+
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    try:
+        result = wm.rag_pipeline.ingest_document(file_bytes, file.filename, session_id)
+        return {"status": "ok", **result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/documents/{session_id}")
+async def list_documents(session_id: str):
+    """List uploaded documents for a session."""
+    wm = get_workflow_manager()
+    if not wm.rag_pipeline:
+        return {"documents": []}
+    docs = wm.rag_pipeline.list_documents(session_id)
+    return {"session_id": session_id, "documents": docs}
+
+
+@router.delete("/documents/{session_id}/{doc_id}")
+async def delete_document(session_id: str, doc_id: str):
+    """Delete all documents for a session (collection-level deletion)."""
+    wm = get_workflow_manager()
+    if not wm.rag_pipeline:
+        raise HTTPException(status_code=501, detail="RAG pipeline not available")
+    wm.rag_pipeline.delete_collection(session_id)
+    return {"status": "deleted", "session_id": session_id}
+
+
+# ============================================================
+# Token Usage & Cost Tracking
+# ============================================================
+
+@router.get("/usage/{session_id}")
+async def get_usage(session_id: str):
+    """Get token usage and cost breakdown for a session."""
+    wm = get_workflow_manager()
+    return wm.token_tracker.get_session_usage(session_id)
+
+
+@router.get("/usage")
+async def get_overall_usage():
+    """Get overall token usage across all sessions."""
+    wm = get_workflow_manager()
+    return wm.token_tracker.get_overall_usage()
+
+
+# ============================================================
+# Agent Memory
+# ============================================================
+
+@router.get("/memory/search")
+async def search_memory(query: str, agent_type: Optional[str] = None, k: int = 5):
+    """Semantic search across agent memory."""
+    wm = get_workflow_manager()
+    if not wm.agent_memory:
+        return {"results": [], "message": "Agent memory not enabled"}
+    results = wm.agent_memory.recall(query, agent_type=agent_type, k=k)
+    return {"query": query, "results": results}
+
+
+@router.delete("/memory")
+async def clear_memory():
+    """Clear all agent memory."""
+    wm = get_workflow_manager()
+    if not wm.agent_memory:
+        raise HTTPException(status_code=501, detail="Agent memory not enabled")
+    wm.agent_memory.clear_all()
+    return {"status": "cleared"}
+
+
+# ============================================================
+# Evaluation Framework
+# ============================================================
+
+@router.get("/evaluation/metrics")
+async def get_evaluation_metrics():
+    """Get overall evaluation metrics."""
+    wm = get_workflow_manager()
+    return wm.metrics_store.get_overall_metrics()
+
+
+@router.get("/evaluation/{session_id}")
+async def get_evaluation(session_id: str):
+    """Get evaluation scores for a session."""
+    wm = get_workflow_manager()
+    return wm.metrics_store.get_session_metrics(session_id)
 

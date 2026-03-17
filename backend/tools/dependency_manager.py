@@ -11,6 +11,12 @@ from core.logging import get_logger
 
 logger = get_logger('DEPENDENCY')
 
+ALLOWED_PACKAGES = {
+    'numpy', 'pandas', 'matplotlib', 'scipy', 'scikit-learn',
+    'seaborn', 'plotly', 'requests', 'beautifulsoup4', 'openpyxl',
+    'xlrd', 'tabulate', 'pyyaml', 'pillow',
+}
+
 def is_safe_package_name(name: str) -> bool:
     """
     Validate package name to prevent shell injection.
@@ -21,30 +27,33 @@ def is_safe_package_name(name: str) -> bool:
 def install_package(package_name: str) -> Tuple[bool, str]:
     """
     Install a python package using pip.
-    
+
     Args:
         package_name: Name of the package to install
-        
+
     Returns:
         Tuple of (success, message)
     """
     if not is_safe_package_name(package_name):
         return False, f"Invalid package name: {package_name}"
-    
+
+    if package_name.lower() not in ALLOWED_PACKAGES:
+        return False, f"Package not in allowlist: {package_name}"
+
     logger.info(f"📦 Installing dependency: {package_name}...")
-    
+
     try:
-        # install specifically to the current python environment
-        cmd = [sys.executable, "-m", "pip", "install", package_name]
-        
+        # install to an isolated target directory
+        cmd = [sys.executable, "-m", "pip", "install", "--target", "/tmp/wandai_packages", package_name]
+
         result = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=120  # 2 minute timeout for installation
+            timeout=60  # 1 minute timeout for installation
         )
-        
+
         if result.returncode == 0:
             logger.info(f"✅ Successfully installed {package_name}")
             return True, f"Successfully installed {package_name}"
@@ -52,7 +61,7 @@ def install_package(package_name: str) -> Tuple[bool, str]:
             error_msg = result.stderr or result.stdout
             logger.error(f"❌ Failed to install {package_name}: {error_msg}")
             return False, f"Failed to install {package_name}: {error_msg}"
-            
+
     except subprocess.TimeoutExpired:
         return False, f"Installation of {package_name} timed out"
     except Exception as e:

@@ -55,6 +55,7 @@ class PlanStep(BaseModel):
     retry_count: int = 0
     started_at: datetime | None = None
     completed_at: datetime | None = None
+    evaluation_score: dict | None = None  # LLM-as-judge evaluation
     
     class Config:
         use_enum_values = True
@@ -138,6 +139,18 @@ class AgentState(BaseModel):
     step_clarification_step_id: str | None = None  # Which step needs clarification
     step_clarification_questions: list[str] = []  # Questions from the agent
     step_clarifications: dict[str, list[str]] = {}  # step_id -> answers
+
+    # RAG - uploaded documents metadata
+    uploaded_documents: list[dict] = []
+
+    # Guardrails - flags from input/output checks
+    guardrail_flags: list[dict] = []
+
+    # Token usage tracking
+    token_usage: dict = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0.0}
+
+    # Evaluation scores
+    evaluation_scores: dict = {}
     
     class Config:
         use_enum_values = True

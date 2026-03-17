@@ -9,6 +9,7 @@ langgraph
 langchain
 langchain-google-genai
 langchain-openai
+langchain-anthropic
 langchain-community
 langgraph-checkpoint-sqlite
 aiosqlite
@@ -32,3 +33,19 @@ pytest-asyncio
 # WebSocket support (included in uvicorn[standard])
 websockets
 tabulate
+
+# MCP (Model Context Protocol)
+mcp
+fastmcp
+
+# SSE support
+sse-starlette
+
+# RAG & Vector Store
+chromadb
+pypdf
+
+# Observability (OpenTelemetry)
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-otlp-proto-grpc

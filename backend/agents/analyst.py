@@ -9,8 +9,9 @@ from langchain_core.output_parsers import JsonOutputParser
 
 from agents.base import BaseAgent
 from core.state import AgentState, AgentType
-from tools.chart_generator import generate_chart
-from tools.code_executor import execute_python_code
+from core.state_utils import add_log, add_artifact
+from tools.chart_generator import generate_chart as generate_chart_direct
+from tools.code_executor import execute_python_code as execute_python_code_direct
 
 
 class AnalystAgent(BaseAgent):
@@ -20,6 +21,35 @@ class AnalystAgent(BaseAgent):
     """
     
     agent_type = AgentType.ANALYST
+
+    async def _execute_code(self, code: str) -> tuple[bool, str, str | None]:
+        """Execute code via MCP tool if available, otherwise direct."""
+        if self.mcp_manager:
+            try:
+                result = await self.mcp_manager.call_tool("execute_python", {"code": code})
+                if isinstance(result, str):
+                    import json as _json
+                    result = _json.loads(result)
+                if isinstance(result, dict):
+                    return result.get("success", False), result.get("output", ""), result.get("error")
+            except Exception:
+                pass
+        return await execute_python_code_direct(code)
+
+    async def _generate_chart(self, **kwargs) -> dict:
+        """Generate chart via MCP tool if available, otherwise direct."""
+        if self.mcp_manager:
+            try:
+                result = await self.mcp_manager.call_tool("generate_chart", kwargs)
+                if isinstance(result, str):
+                    import json as _json
+                    result = _json.loads(result)
+                if isinstance(result, dict):
+                    return result
+            except Exception:
+                pass
+        return await generate_chart_direct(**kwargs)
+
     system_prompt = """You are a Data Analysis Specialist AI agent. Your job is to analyze data and create insightful visualizations.
 
 Your capabilities:
@@ -34,6 +64,11 @@ Guidelines:
 3. Include clear titles and labels on charts
 4. Highlight key insights in your analysis
 5. Use statistical measures where appropriate (mean, median, trends)
+
+CRITICAL DATA INTEGRITY RULES:
+- ONLY work with data that was provided by previous steps. NEVER fabricate or simulate data.
+- If the data from previous steps is incomplete, contains "DATA_NOT_FOUND", or is insufficient for the requested analysis, report this clearly instead of proceeding with fake data.
+- It is better to produce no chart than a chart with fabricated data.
 
 For charts, specify:
 - Chart type (line, bar, pie, scatter, area)
@@ -94,7 +129,7 @@ If not creating a chart, set chart_config to null."""),
             
             # Perform analysis if needed
             if task_type in ["analysis", "both"]:
-                state.add_log(
+                add_log(state,
                     self.agent_type,
                     "Performing data analysis...",
                     step_id=step_id
@@ -119,10 +154,11 @@ Provide:
                     "task": task_description,
                     "context": context
                 })
-                
+                self._last_usage = getattr(analysis_result, 'usage_metadata', None)
+
                 results["analysis"] = analysis_result.content
                 
-                state.add_artifact(
+                add_artifact(state,
                     name=f"analysis_{step_id}",
                     artifact_type="text",
                     content=analysis_result.content,
@@ -134,7 +170,7 @@ Provide:
             if task_type in ["chart", "both"] and plan.get("chart_config"):
                 chart_config = plan["chart_config"]
                 
-                state.add_log(
+                add_log(state,
                     self.agent_type,
                     f"Generating {chart_config.get('chart_type', 'line')} chart...",
                     step_id=step_id
@@ -147,20 +183,24 @@ Provide:
                 
                 # Generate data for chart using code execution
                 data_gen_prompt = ChatPromptTemplate.from_messages([
-                    ("system", """Generate Python code that creates the data for a chart.
+                    ("system", """Generate Python code that extracts and formats data for a chart from the provided context.
 
 The code should:
-1. Create sample/demo data OR process provided data
+1. Extract REAL data from the provided context (previous step results)
 2. Print a JSON object with format:
    {{"labels": [...], "values": [...], "datasets": [{{ "label": "...", "data": [...] }}]}}
-
 3. Return your code in JSON format:
 {{
     "code": "<your python code here>",
     "explanation": "<brief explanation>"
 }}
 
-Available libraries: json, datetime, random (for demo data)"""),
+CRITICAL RULES:
+- ONLY use data that exists in the provided context. NEVER fabricate, simulate, or generate fake data.
+- If the context does not contain the numerical data needed for the chart, print "ERROR_MISSING_DATA: [describe what data is needed]" instead.
+- Do NOT use random numbers or placeholder values as substitutes for real data.
+
+Available libraries: json, datetime, re"""),
                     ("user", "Create data for: {data_desc}\n\nContext: {context}")
                 ])
                 
@@ -172,8 +212,18 @@ Available libraries: json, datetime, random (for demo data)"""),
                 
                 code = data_result.get("code", "")
                 if code:
-                    success, output, error = await execute_python_code(code)
-                    
+                    success, output, error = await self._execute_code(code)
+
+                    # Check if code reported missing data
+                    if success and output and "ERROR_MISSING_DATA:" in output:
+                        add_log(state, self.agent_type,
+                            f"Chart data unavailable: {output[:200]}",
+                            level="warning", step_id=step_id
+                        )
+                        results["data_warning"] = output
+                        # Skip chart generation — data is missing
+                        success = False
+
                     if success and output:
                         try:
                             import json
@@ -192,7 +242,7 @@ Available libraries: json, datetime, random (for demo data)"""),
                                     raise
                             
                             # Generate the chart
-                            chart_result = await generate_chart(
+                            chart_result = await self._generate_chart(
                                 chart_type=chart_config.get("chart_type", "line"),
                                 data=chart_data,
                                 title=chart_config.get("title", "Chart"),
@@ -201,7 +251,7 @@ Available libraries: json, datetime, random (for demo data)"""),
                             )
                             
                             if chart_result.get("success"):
-                                state.add_artifact(
+                                add_artifact(state,
                                     name=f"chart_{step_id}",
                                     artifact_type="chart",
                                     content={
@@ -225,7 +275,7 @@ Available libraries: json, datetime, random (for demo data)"""),
                                     "chart_title": chart_config.get("title")
                                 })
                         except Exception as e:
-                            state.add_log(
+                            add_log(state,
                                 self.agent_type,
                                 f"Chart data parsing failed: {str(e)}",
                                 level="warning",
@@ -240,13 +290,15 @@ Available libraries: json, datetime, random (for demo data)"""),
             # Return combined results
             if results:
                 summary = []
+                if "data_warning" in results:
+                    summary.append(f"DATA_NOT_FOUND: {results['data_warning']}")
                 if "analysis" in results:
                     summary.append(f"Analysis:\n{results['analysis']}")
                 if "chart" in results:
                     summary.append(f"Chart created: {results['chart'].get('title', 'Untitled')}")
-                
+
                 return True, "\n\n".join(summary), None
-            
+
             return False, None, "No analysis or chart could be generated"
             
         except Exception as e:

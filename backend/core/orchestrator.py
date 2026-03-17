@@ -11,8 +11,13 @@ from langchain_core.output_parsers import JsonOutputParser
 from config import config
 from core.llm import get_llm
 from core.state import (
-    AgentState, AgentType, ExecutionStatus, 
+    AgentState, AgentType, ExecutionStatus,
     PlanStep, StepStatus
+)
+from core.state_utils import (
+    get_state_attr, set_state_attr, get_status_value,
+    get_plan, get_step_attr, set_step_attr, get_step_status,
+    add_log, state_to_event, get_artifact_attr,
 )
 from core.logging import (
     orchestrator_logger as logger,
@@ -27,93 +32,86 @@ class Orchestrator:
     The Hub - Manages the entire orchestration flow.
     Does not execute tasks; it plans, routes, and aggregates.
     """
-    
-    def __init__(self, event_callback=None):
-        """
-        Initialize the orchestrator.
-        
-        Args:
-            event_callback: Async function to send real-time events
-        """
+
+    def __init__(self, event_callback=None, token_tracker=None, guardrails_manager=None,
+                 judge=None, metrics_store=None):
         self.llm = get_llm()
         self.event_callback = event_callback
-    
-    async def emit_event(self, event_type: str, state: AgentState, extra: dict = None):
+        self.token_tracker = token_tracker
+        self.guardrails_manager = guardrails_manager
+        self.judge = judge
+        self.metrics_store = metrics_store
+        self._a2a_client = None
+        self._external_agents: dict[str, Any] = {}  # url -> AgentCard
+
+    async def discover_external_agents(self, agent_urls: list[str]) -> None:
+        """Discover external A2A agents for potential delegation."""
+        from a2a.client import A2AClient
+        self._a2a_client = A2AClient()
+        for url in agent_urls:
+            try:
+                card = await self._a2a_client.discover(url)
+                self._external_agents[url] = card
+                logger.info(f"Discovered external A2A agent: {card.name} at {url}")
+            except Exception as e:
+                logger.warning(f"Failed to discover A2A agent at {url}: {e}")
+
+    async def delegate_to_external_agent(self, agent_url: str, task_text: str) -> str:
+        """Delegate a task to an external A2A agent and return the result text."""
+        if not self._a2a_client:
+            raise RuntimeError("A2A client not initialized")
+        task = await self._a2a_client.send_task(agent_url, task_text)
+        # Extract text from the completed task
+        if task.status.message:
+            for part in task.status.message.parts:
+                if hasattr(part, 'text'):
+                    return part.text
+        if task.artifacts:
+            for artifact in task.artifacts:
+                for part in artifact.parts:
+                    if hasattr(part, 'text'):
+                        return part.text
+        return "External agent returned no text output"
+
+    async def emit_event(self, event_type: str, state, extra: dict = None):
         """Emit a real-time event if callback is configured."""
         if self.event_callback:
-            event = state.to_event(event_type)
+            event = state_to_event(state, event_type)
             if extra:
                 event.update(extra)
             await self.event_callback(event)
-    
-    async def check_ambiguity(self, state: AgentState) -> AgentState:
+
+    async def check_ambiguity(self, state) -> Any:
         """
         Check if the user request is clear enough to proceed.
         Rates clarity 0-10 and generates clarifying questions if needed.
-        Only asks for clarification ONCE - if user has already provided clarifications, skip.
+        Only asks for clarification ONCE.
         """
-        # Handle dict state - get user_clarifications
-        if isinstance(state, dict):
-            user_clarifications = state.get('user_clarifications', [])
-            user_request = state.get('user_request', '')
-        else:
-            user_clarifications = getattr(state, 'user_clarifications', [])
-            user_request = state.user_request
-        
+        user_clarifications = get_state_attr(state, 'user_clarifications', [])
+        user_request = get_state_attr(state, 'user_request', '')
+
         logger.debug(f"check_ambiguity: user_clarifications = {user_clarifications}")
         logger.debug(f"check_ambiguity: user_request contains 'Clarifications:' = {'Clarifications:' in user_request}")
-        
-        # Skip clarification if already provided (only ask once)
-        # Check both the list AND if the request already contains clarifications text
+
         already_clarified = (
             (user_clarifications and len(user_clarifications) > 0) or
             'Clarifications:' in user_request
         )
-        
+
         if already_clarified:
             logger.info("Clarifications already provided, skipping ambiguity check")
-            if isinstance(state, dict):
-                state['status'] = ExecutionStatus.PLANNING
-                state['clarity_score'] = 10  # Assume clear after user clarified
-                # Add log entry for dict state
-                from core.state import AgentLog
-                if 'logs' not in state:
-                    state['logs'] = []
-                state['logs'].append(AgentLog(
-                    timestamp=datetime.now(),
-                    agent_type=AgentType.ORCHESTRATOR,
-                    message="Clarifications already provided, skipping ambiguity check"
-                ))
-            else:
-                state.status = ExecutionStatus.PLANNING
-                state.clarity_score = 10
-                state.add_log(
-                    AgentType.ORCHESTRATOR,
-                    "Clarifications already provided, skipping ambiguity check"
-                )
+            set_state_attr(state, 'status', ExecutionStatus.PLANNING)
+            set_state_attr(state, 'clarity_score', 10)
+            add_log(state, AgentType.ORCHESTRATOR,
+                    "Clarifications already provided, skipping ambiguity check")
             return state
-        
+
         logger.info("Analyzing request clarity...")
-        if isinstance(state, dict):
-            state['status'] = ExecutionStatus.PLANNING
-        else:
-            state.status = ExecutionStatus.PLANNING
-        
-        # Add log entry
-        if isinstance(state, dict):
-            from core.state import AgentLog
-            if 'logs' not in state:
-                state['logs'] = []
-            state['logs'].append(AgentLog(
-                timestamp=datetime.now(),
-                agent_type=AgentType.ORCHESTRATOR,
-                message="Analyzing request clarity..."
-            ))
-        else:
-            state.add_log(AgentType.ORCHESTRATOR, "Analyzing request clarity...")
-        
+        set_state_attr(state, 'status', ExecutionStatus.PLANNING)
+        add_log(state, AgentType.ORCHESTRATOR, "Analyzing request clarity...")
+
         await self.emit_event("ambiguity_check_started", state)
-        
+
         prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a request clarity analyzer. Your job is to assess if a user's business request is clear enough to execute.
 
@@ -135,81 +133,77 @@ Respond in JSON format:
 }}"""),
             ("user", "Analyze this request: {request}")
         ])
-        
-        chain = prompt | self.llm | JsonOutputParser()
-        
+
+        fast_llm = get_llm(tier="fast")
+        raw_chain = prompt | fast_llm
+
         try:
-            llm_logger.debug(f"📤 Calling LLM for ambiguity check...")
-            result = await chain.ainvoke({"request": user_request})
-            llm_logger.debug(f"📥 LLM response: {result}")
-            
+            from observability.tracing import get_tracer
+            tracer = get_tracer("wandai.orchestrator")
+
+            llm_logger.debug(f"Calling LLM for ambiguity check...")
+            with tracer.start_as_current_span("orchestrator.check_ambiguity"):
+                raw_response = await raw_chain.ainvoke({"request": user_request})
+
+            # Track token usage
+            usage = getattr(raw_response, 'usage_metadata', None)
+            if self.token_tracker and usage:
+                try:
+                    session_id = get_state_attr(state, 'session_id', '')
+                    self.token_tracker.record_usage(
+                        session_id, "orchestrator", "check_ambiguity",
+                        config.llm.model_name,
+                        usage.get('input_tokens', 0),
+                        usage.get('output_tokens', 0),
+                    )
+                except Exception:
+                    pass
+
+            result = JsonOutputParser().parse(raw_response.content)
+            llm_logger.debug(f"LLM response: {result}")
+
             clarity_score = result.get("clarity_score", 10)
             clarifying_questions = result.get("clarifying_questions", [])
-            
-            if isinstance(state, dict):
-                state['clarity_score'] = clarity_score
-                state['clarifying_questions'] = clarifying_questions
-            else:
-                state.clarity_score = clarity_score
-                state.clarifying_questions = clarifying_questions
-            
+
+            set_state_attr(state, 'clarity_score', clarity_score)
+            set_state_attr(state, 'clarifying_questions', clarifying_questions)
+
             if clarity_score < config.agent.clarity_threshold:
                 logger.warning(f"Request needs clarification (score: {clarity_score}/10)")
-                if isinstance(state, dict):
-                    state['status'] = ExecutionStatus.WAITING_CLARIFICATION
-                else:
-                    state.status = ExecutionStatus.WAITING_CLARIFICATION
+                set_state_attr(state, 'status', ExecutionStatus.WAITING_CLARIFICATION)
             else:
                 logger.info(f"Request is clear (score: {clarity_score}/10)")
-            
+
             await self.emit_event("ambiguity_check_completed", state, {
                 "clarity_score": clarity_score,
                 "needs_clarification": clarity_score < config.agent.clarity_threshold
             })
-            
+
         except Exception as e:
             logger.error(f"Ambiguity check failed: {str(e)}")
-            # Assume clear if check fails
-            if isinstance(state, dict):
-                state['clarity_score'] = 10
-            else:
-                state.clarity_score = 10
-        
+            set_state_attr(state, 'clarity_score', 10)
+
         return state
-    
-    async def create_plan(self, state: AgentState) -> AgentState:
+
+    async def create_plan(self, state) -> Any:
         """
         Decompose the user request into a sequence of executable steps.
         Each step is assigned to a specific agent type.
         """
-        # Handle dict state
-        if isinstance(state, dict):
-            state['status'] = ExecutionStatus.PLANNING
-            state['logs'] = state.get('logs', [])
-            state['logs'].append({
-                "timestamp": datetime.now().isoformat(),
-                "agent_type": "orchestrator",
-                "message": "Creating execution plan...",
-                "level": "info",
-                "data": {}
-            })
-            user_request = state.get('user_request', '')
-            user_clarifications = state.get('user_clarifications', [])
-        else:
-            state.status = ExecutionStatus.PLANNING
-            state.add_log(AgentType.ORCHESTRATOR, "Creating execution plan...")
-            user_request = state.user_request
-            user_clarifications = state.user_clarifications
-            
+        set_state_attr(state, 'status', ExecutionStatus.PLANNING)
+        add_log(state, AgentType.ORCHESTRATOR, "Creating execution plan...")
+
+        user_request = get_state_attr(state, 'user_request', '')
+        user_clarifications = get_state_attr(state, 'user_clarifications', [])
+
         await self.emit_event("planning_started", state)
-        
-        # Include any clarifications in the context
+
         context = user_request
         if user_clarifications:
             context += "\n\nUser clarifications:\n" + "\n".join(
                 f"- {c}" for c in user_clarifications
             )
-        
+
         # Load custom agents
         import json
         import os
@@ -260,311 +254,245 @@ Respond in JSON format:
 }}}}"""),
             ("user", "Create a plan for this request: {context}")
         ])
-        
-        chain = prompt | self.llm | JsonOutputParser()
-        
+
+        fast_llm = get_llm(tier="fast")
+        raw_chain = prompt | fast_llm
+
         try:
-            result = await chain.ainvoke({
-                "context": context, 
-                "custom_agents": custom_agents_str
-            })
-            
-            # Convert to PlanStep objects (or dicts)
+            from observability.tracing import get_tracer
+            tracer = get_tracer("wandai.orchestrator")
+            with tracer.start_as_current_span("orchestrator.create_plan"):
+                raw_response = await raw_chain.ainvoke({
+                    "context": context,
+                    "custom_agents": custom_agents_str
+                })
+
+            # Track token usage
+            usage = getattr(raw_response, 'usage_metadata', None)
+            if self.token_tracker and usage:
+                try:
+                    session_id = get_state_attr(state, 'session_id', '')
+                    self.token_tracker.record_usage(
+                        session_id, "orchestrator", "create_plan",
+                        config.llm.model_name,
+                        usage.get('input_tokens', 0),
+                        usage.get('output_tokens', 0),
+                    )
+                except Exception:
+                    pass
+
+            result = JsonOutputParser().parse(raw_response.content)
+
             new_plan = []
             for step_data in result.get("plan", []):
-                # Ensure agent_type is valid - allow custom agents (strings)
                 a_type = step_data.get("agent_type", "researcher")
-                # Removed strict AgentType enum validation to allow custom agents
-                
+
                 step = PlanStep(
                     id=step_data.get("id", f"step_{len(new_plan)+1}"),
                     description=step_data.get("description", ""),
                     agent_type=a_type,
                     dependencies=step_data.get("dependencies", [])
                 )
-                
+
+                # Always store as dict for LangGraph compatibility
                 if isinstance(state, dict):
                     new_plan.append(step.model_dump())
                 else:
                     new_plan.append(step)
-            
-            if isinstance(state, dict):
-                state['plan'] = new_plan
-                state['current_step_index'] = 0
-                state['logs'].append({
-                    "timestamp": datetime.now().isoformat(),
-                    "agent_type": "orchestrator",
-                    "message": f"Created plan with {len(new_plan)} steps",
-                    "level": "info",
-                    "data": {}
-                })
-            else:
-                state.plan = new_plan
-                state.current_step_index = 0
-                state.add_log(
-                    AgentType.ORCHESTRATOR,
-                    f"Created plan with {len(new_plan)} steps"
-                )
-            
+
+            set_state_attr(state, 'plan', new_plan)
+            set_state_attr(state, 'current_step_index', 0)
+            add_log(state, AgentType.ORCHESTRATOR,
+                    f"Created plan with {len(new_plan)} steps")
+
             await self.emit_event("planning_completed", state, {
                 "plan_size": len(new_plan),
                 "reasoning": result.get("reasoning", "")
             })
-            
+
         except Exception as e:
             error_msg = f"Planning failed: {str(e)}"
-            if isinstance(state, dict):
-                state['status'] = ExecutionStatus.ERROR
-                state['error_message'] = error_msg
-                state['logs'].append({
-                    "timestamp": datetime.now().isoformat(),
-                    "agent_type": "orchestrator",
-                    "message": error_msg,
-                    "level": "error",
-                    "data": {}
-                })
-            else:
-                state.status = ExecutionStatus.ERROR
-                state.error_message = error_msg
-                state.add_log(
-                    AgentType.ORCHESTRATOR,
-                    state.error_message,
-                    level="error"
-                )
-        
+            set_state_attr(state, 'status', ExecutionStatus.ERROR)
+            set_state_attr(state, 'error_message', error_msg)
+            add_log(state, AgentType.ORCHESTRATOR, error_msg, level="error")
+
         return state
-    
-    async def route_to_agent(self, state: AgentState) -> tuple[AgentType | None, PlanStep | None]:
+
+    async def route_to_agent(self, state) -> tuple[str | None, PlanStep | None]:
         """
         Determine which agent should handle the next step.
         Returns the agent type and step, or (None, None) if all done.
         """
-        # Handle dict state
-        if isinstance(state, dict):
-            plan = state.get('plan', [])
-        else:
-            plan = state.plan
-            
+        plan = get_plan(state)
+
         # Find first pending step with all dependencies satisfied
         completed_ids = set()
         for step in plan:
-            if isinstance(step, dict):
-                status = step.get('status', 'pending')
-                if hasattr(status, 'value'): status = status.value
-            else:
-                status = step.status.value if hasattr(step.status, 'value') else str(step.status)
-                
-            if str(status) == "completed":
-                if isinstance(step, dict):
-                    completed_ids.add(step.get('id'))
-                else:
-                    completed_ids.add(step.id)
-        
+            if get_step_status(step) == "completed":
+                completed_ids.add(get_step_attr(step, 'id'))
+
         for step in plan:
-            if isinstance(step, dict):
-                status = step.get('status', 'pending')
-                if hasattr(status, 'value'): status = status.value
-            else:
-                status = step.status.value if hasattr(step.status, 'value') else str(step.status)
-                
-            if str(status) in ["pending", "retrying"]:
-                # Check if all dependencies are satisfied
-                if isinstance(step, dict):
-                    dependencies = step.get('dependencies', [])
-                else:
-                    dependencies = step.dependencies
-                    
+            status = get_step_status(step)
+            if status in ["pending", "retrying"]:
+                dependencies = get_step_attr(step, 'dependencies', [])
                 deps_satisfied = all(dep in completed_ids for dep in dependencies)
-                
+
                 if deps_satisfied:
-                    # Update status to in_progress
+                    set_step_attr(step, 'status', StepStatus.IN_PROGRESS.value if isinstance(step, dict) else StepStatus.IN_PROGRESS)
+
+                    agent_type_str = get_step_attr(step, 'agent_type', 'researcher')
+                    if hasattr(agent_type_str, 'value'):
+                        agent_type_str = agent_type_str.value
+                    agent_type = str(agent_type_str)
+
+                    logger.info(f"[ROUTE] Routing step '{get_step_attr(step, 'id')}' to agent: {agent_type}")
+
+                    # Convert dict step to PlanStep object for return
                     if isinstance(step, dict):
-                        try:
-                            step['status'] = StepStatus.IN_PROGRESS.value
-                            agent_type_str = step.get('agent_type', 'researcher')
-                            
-                            # DEBUG LOGGING FOR POET CRASH
-                            logger.info(f"🔎 [ROUTE_DEBUG] Processing step agent: {agent_type_str} type: {type(agent_type_str)}")
-                            
-                            # Check if it has value attribute (Enum) or use str directly
-                            if hasattr(agent_type_str, 'value'): 
-                                agent_type_str = agent_type_str.value
-                            
-                            # Allow custom agents (strings)
-                            agent_type = str(agent_type_str)
-                            
-                            logger.info(f"🔎 [ROUTE_DEBUG] Resolved agent_type: {agent_type}")
-                            
-                            # Convert dict step to PlanStep object for return
-                            step_obj = PlanStep(**step)
-                            return agent_type, step_obj
-                        except Exception as e:
-                            logger.error(f"🔥 [ROUTE_CRASH] Error in route_to_agent dict handling: {e}")
-                            import traceback
-                            logger.error(traceback.format_exc())
-                            raise e
+                        step_obj = PlanStep(**step)
                     else:
-                        try:
-                            logger.info(f"🔎 [ROUTE_DEBUG] Processing step obj agent: {step.agent_type} type: {type(step.agent_type)}")
-                            step.status = StepStatus.IN_PROGRESS
-                            # CRITICAL: Ensure we return string, not Enum, just in case
-                            a_type = step.agent_type
-                            if hasattr(a_type, 'value'): a_type = a_type.value
-                            return str(a_type), step
-                        except Exception as e:
-                            logger.error(f"🔥 [ROUTE_CRASH] Error in route_to_agent object handling: {e}")
-                            import traceback
-                            logger.error(traceback.format_exc())
-                            raise e
-        
+                        step_obj = step
+                    return agent_type, step_obj
+
         return None, None
-    
+
+    async def get_all_executable_steps(self, state) -> list[tuple[str, PlanStep]]:
+        """
+        Get ALL steps whose dependencies are satisfied (for parallel execution).
+        Returns list of (agent_type, step) tuples.
+        """
+        plan = get_plan(state)
+
+        completed_ids = set()
+        for step in plan:
+            if get_step_status(step) == "completed":
+                completed_ids.add(get_step_attr(step, 'id'))
+
+        executable = []
+        for step in plan:
+            status = get_step_status(step)
+            if status in ["pending", "retrying"]:
+                dependencies = get_step_attr(step, 'dependencies', [])
+                if all(dep in completed_ids for dep in dependencies):
+                    set_step_attr(step, 'status', StepStatus.IN_PROGRESS.value if isinstance(step, dict) else StepStatus.IN_PROGRESS)
+
+                    agent_type_str = get_step_attr(step, 'agent_type', 'researcher')
+                    if hasattr(agent_type_str, 'value'):
+                        agent_type_str = agent_type_str.value
+
+                    step_obj = PlanStep(**step) if isinstance(step, dict) else step
+                    executable.append((str(agent_type_str), step_obj))
+
+        return executable
+
     async def handle_step_result(
-        self, 
-        state: AgentState, 
-        step_id: str, 
-        success: bool, 
+        self,
+        state,
+        step_id: str,
+        success: bool,
         result: Any = None,
         error: str = None
-    ) -> AgentState:
+    ) -> Any:
         """Process the result of an agent's step execution."""
-        if isinstance(state, dict):
-            plan = state.get('plan', [])
-        else:
-            plan = state.plan
-            
+        plan = get_plan(state)
+
         step = None
         for s in plan:
-            if isinstance(s, dict):
-                if s.get('id') == step_id:
-                    step = s
-                    break
-            elif s.id == step_id:
+            if get_step_attr(s, 'id') == step_id:
                 step = s
                 break
-                
+
         if not step:
             return state
-        
+
         if success:
-            if isinstance(step, dict):
-                step['status'] = StepStatus.COMPLETED.value
-                step['result'] = result
-                step['completed_at'] = datetime.now().isoformat()
-            else:
-                step.status = StepStatus.COMPLETED
-                step.result = result
-                step.completed_at = datetime.now()
-                
-            if isinstance(state, dict):
-                state['logs'] = state.get('logs', [])
-                state['logs'].append({
-                    "timestamp": datetime.now().isoformat(),
-                    "agent_type": "orchestrator",
-                    "message": f"Step '{step_id}' completed successfully",
-                    "level": "info",
-                    "data": {}
+            # Data integrity check: detect if agent reported missing data despite "success"
+            result_str = str(result) if result else ""
+            _DATA_INTEGRITY_MARKERS = ["DATA_NOT_FOUND:", "ERROR_MISSING_DATA:"]
+            data_integrity_issue = any(marker in result_str for marker in _DATA_INTEGRITY_MARKERS)
+
+            if data_integrity_issue:
+                # Mark step as completed but with a data quality warning
+                set_step_attr(step, 'data_quality_warning', True)
+                logger.warning(f"Step '{step_id}' completed but flagged missing/unavailable data")
+                add_log(state, AgentType.ORCHESTRATOR,
+                        f"WARNING: Step '{step_id}' could not find the requested data. "
+                        "Downstream steps may be affected.",
+                        level="warning")
+                await self.emit_event("data_quality_warning", state, {
+                    "step_id": step_id,
+                    "message": "Step reported missing or unavailable data. Results may be incomplete."
                 })
-            else:
-                state.add_log(
-                    AgentType.ORCHESTRATOR,
-                    f"Step '{step_id}' completed successfully"
-                )
+
+            set_step_attr(step, 'status', StepStatus.COMPLETED.value if isinstance(step, dict) else StepStatus.COMPLETED)
+            set_step_attr(step, 'result', result)
+            set_step_attr(step, 'completed_at', datetime.now().isoformat() if isinstance(step, dict) else datetime.now())
+
+            # Fire non-blocking evaluation
+            if self.judge and self.metrics_store and result:
+                import asyncio
+                async def _evaluate():
+                    try:
+                        step_desc = get_step_attr(step, 'description', '')
+                        agent_type_str = get_step_attr(step, 'agent_type', 'unknown')
+                        eval_result = await self.judge.evaluate_step(step_desc, str(result))
+                        set_step_attr(step, 'evaluation_score', eval_result.to_dict())
+                        session_id = get_state_attr(state, 'session_id', '')
+                        self.metrics_store.record_step_eval(
+                            session_id, step_id, agent_type_str, eval_result
+                        )
+                    except Exception as eval_err:
+                        logger.debug(f"Step evaluation failed (non-critical): {eval_err}")
+                task = asyncio.create_task(_evaluate())
+                task.add_done_callback(lambda t: logger.error(f"Step eval task failed: {t.exception()}") if t.exception() else None)
+
+            add_log(state, AgentType.ORCHESTRATOR,
+                    f"Step '{step_id}' completed successfully")
             await self.emit_event("step_completed", state, {"step_id": step_id})
         else:
-            if isinstance(step, dict):
-                retry_count = step.get('retry_count', 0) + 1
-                step['retry_count'] = retry_count
-                
-                if retry_count < config.agent.max_retries:
-                    step['status'] = StepStatus.RETRYING.value
-                    step['error'] = error
-                    level = "warning"
-                    msg = f"Step '{step_id}' failed, retrying ({retry_count}/{config.agent.max_retries})"
-                    event_type = "step_retrying"
-                else:
-                    step['status'] = StepStatus.FAILED.value
-                    step['error'] = error
-                    level = "error"
-                    msg = f"Step '{step_id}' failed after {retry_count} retries"
-                    event_type = "step_failed"
+            retry_count = get_step_attr(step, 'retry_count', 0) + 1
+            set_step_attr(step, 'retry_count', retry_count)
+
+            if retry_count < config.agent.max_retries:
+                set_step_attr(step, 'status', StepStatus.RETRYING.value if isinstance(step, dict) else StepStatus.RETRYING)
+                set_step_attr(step, 'error', error)
+                level = "warning"
+                msg = f"Step '{step_id}' failed, retrying ({retry_count}/{config.agent.max_retries})"
+                event_type = "step_retrying"
             else:
-                step.retry_count += 1
-                retry_count = step.retry_count
-                
-                if step.retry_count < config.agent.max_retries:
-                    step.status = StepStatus.RETRYING
-                    step.error = error
-                    level = "warning"
-                    msg = f"Step '{step_id}' failed, retrying ({step.retry_count}/{config.agent.max_retries})"
-                    event_type = "step_retrying"
-                else:
-                    step.status = StepStatus.FAILED
-                    step.error = error
-                    level = "error"
-                    msg = f"Step '{step_id}' failed after {step.retry_count} retries"
-                    event_type = "step_failed"
-            
-            if isinstance(state, dict):
-                state['logs'] = state.get('logs', [])
-                state['logs'].append({
-                    "timestamp": datetime.now().isoformat(),
-                    "agent_type": "orchestrator",
-                    "message": msg,
-                    "level": level,
-                    "data": {}
-                })
-            else:
-                state.add_log(
-                    AgentType.ORCHESTRATOR,
-                    msg,
-                    level=level
-                )
-            
+                set_step_attr(step, 'status', StepStatus.FAILED.value if isinstance(step, dict) else StepStatus.FAILED)
+                set_step_attr(step, 'error', error)
+                level = "error"
+                msg = f"Step '{step_id}' failed after {retry_count} retries"
+                event_type = "step_failed"
+
+            add_log(state, AgentType.ORCHESTRATOR, msg, level=level)
             await self.emit_event(event_type, state, {
                 "step_id": step_id,
                 "error": error,
                 "retry_count": retry_count
             })
-        
+
         return state
-    
-    async def aggregate_results(self, state: AgentState) -> AgentState:
+
+    async def aggregate_results(self, state) -> Any:
         """
         Synthesize all artifacts into a final natural language response.
         """
-        if isinstance(state, dict):
-            state['logs'] = state.get('logs', [])
-            state['logs'].append({
-                "timestamp": datetime.now().isoformat(),
-                "agent_type": "orchestrator",
-                "message": "Aggregating results...",
-                "level": "info",
-                "data": {}
-            })
-            artifacts = state.get('artifacts', {})
-            plan = state.get('plan', [])
-            user_request = state.get('user_request', '')
-        else:
-            state.add_log(AgentType.ORCHESTRATOR, "Aggregating results...")
-            artifacts = state.artifacts
-            plan = state.plan
-            user_request = state.user_request
-            
+        add_log(state, AgentType.ORCHESTRATOR, "Aggregating results...")
+        artifacts = get_state_attr(state, 'artifacts', {})
+        plan = get_plan(state)
+        user_request = get_state_attr(state, 'user_request', '')
+
         await self.emit_event("aggregation_started", state)
-        
+
         # Collect all artifacts
         artifacts_summary = []
         for artifact_id, artifact in artifacts.items():
-            if isinstance(artifact, dict):
-                a_type = artifact.get('type')
-                a_name = artifact.get('name')
-                a_content = artifact.get('content')
-            else:
-                a_type = artifact.type
-                a_name = artifact.name
-                a_content = artifact.content
-                
+            a_type = get_artifact_attr(artifact, 'type')
+            a_name = get_artifact_attr(artifact, 'name')
+            a_content = get_artifact_attr(artifact, 'content')
+
             if a_type == "image":
                 artifacts_summary.append(f"- {a_name}: [Image generated]")
             elif a_type == "chart":
@@ -573,23 +501,35 @@ Respond in JSON format:
             else:
                 content_preview = str(a_content)[:200]
                 artifacts_summary.append(f"- {a_name}: {content_preview}")
-        
-        # Collect step results
+
+        # Collect step results and track data quality
         step_results = []
+        failed_steps = []
+        data_warnings = []
         for step in plan:
-            if isinstance(step, dict):
-                s_result = step.get('result')
-                s_id = step.get('id')
-                s_type = step.get('agent_type')
-            else:
-                s_result = step.result
-                s_id = step.id
-                s_type = step.agent_type
-                
-            if s_result:
-                result_preview = str(s_result)[:300]
+            s_result = get_step_attr(step, 'result')
+            s_id = get_step_attr(step, 'id')
+            s_type = get_step_attr(step, 'agent_type')
+            s_status = get_step_status(step)
+            s_error = get_step_attr(step, 'error', '')
+
+            if s_status == "failed":
+                failed_steps.append(f"Step '{s_id}' ({s_type}): FAILED - {s_error}")
+            elif s_result:
+                result_str = str(s_result)
+                # Check for data integrity markers
+                if "DATA_NOT_FOUND:" in result_str or "ERROR_MISSING_DATA:" in result_str:
+                    data_warnings.append(f"Step '{s_id}' ({s_type}): Could not retrieve requested data")
+                result_preview = result_str[:300]
                 step_results.append(f"Step '{s_id}' ({s_type}): {result_preview}")
-        
+
+        # Build pipeline issues section for the prompt
+        pipeline_issues = ""
+        if failed_steps:
+            pipeline_issues += "\n\nFAILED STEPS:\n" + "\n".join(failed_steps)
+        if data_warnings:
+            pipeline_issues += "\n\nDATA QUALITY WARNINGS:\n" + "\n".join(data_warnings)
+
         prompt = ChatPromptTemplate.from_messages([
             ("system", """You are a results aggregator. Your job is to synthesize the outputs from multiple AI agents into a coherent, user-friendly response.
 
@@ -598,6 +538,12 @@ Create a clear, well-structured response that:
 2. Summarizes key findings
 3. References any charts or visualizations created
 4. Highlights important insights
+
+CRITICAL HONESTY RULES:
+- If any steps failed or could not retrieve the requested data, you MUST clearly inform the user about this.
+- NEVER present fabricated or simulated data as if it were real.
+- If the pipeline could not fulfill the user's request due to missing data, say so honestly and suggest alternatives (e.g., "The data could not be retrieved. You may try [alternative approach].").
+- Add a visible warning section if there were data quality issues.
 
 IMPORTANT: If the user request asks to include specific text, phrases, or formats, you MUST include them exactly as requested.
 
@@ -609,55 +555,83 @@ Step results:
 
 Artifacts created:
 {artifacts}
+{pipeline_issues}
 
-Synthesize these into a final response for the user.""")
+Synthesize these into a final response for the user. If there were failures or data quality issues, make sure to alert the user clearly.""")
         ])
-        
+
         chain = prompt | self.llm
-        
+
         try:
-            result = await chain.ainvoke({
-                "request": user_request,
-                "step_results": "\n".join(step_results) or "No step results available",
-                "artifacts": "\n".join(artifacts_summary) or "No artifacts created"
-            })
-            
-            if isinstance(state, dict):
-                state['final_response'] = result.content
-                state['status'] = ExecutionStatus.COMPLETED
-                state['logs'].append({
-                    "timestamp": datetime.now().isoformat(),
-                    "agent_type": "orchestrator",
-                    "message": "Results aggregated successfully",
-                    "level": "info",
-                    "data": {}
+            from observability.tracing import get_tracer
+            tracer = get_tracer("wandai.orchestrator")
+
+            with tracer.start_as_current_span("orchestrator.aggregate_results"):
+                full_content = ""
+                last_chunk = None
+                async for chunk in chain.astream({
+                    "request": user_request,
+                    "step_results": "\n".join(step_results) or "No step results available",
+                    "artifacts": "\n".join(artifacts_summary) or "No artifacts created",
+                    "pipeline_issues": pipeline_issues
+                }):
+                    token = chunk.content if hasattr(chunk, 'content') else str(chunk)
+                    if token:
+                        full_content += token
+                        await self.emit_event("streaming_token", state, {"token": token})
+                    last_chunk = chunk
+
+                await self.emit_event("streaming_complete", state, {
+                    "total_length": len(full_content)
                 })
-            else:
-                state.final_response = result.content
-                state.status = ExecutionStatus.COMPLETED
-                state.add_log(AgentType.ORCHESTRATOR, "Results aggregated successfully")
-                
+
+            final_content = full_content
+
+            # Track token usage for aggregation (some providers include usage on last chunk)
+            usage = getattr(last_chunk, 'usage_metadata', None)
+            if self.token_tracker and usage:
+                try:
+                    session_id = get_state_attr(state, 'session_id', '')
+                    self.token_tracker.record_usage(
+                        session_id, "orchestrator", "aggregate_results",
+                        config.llm.model_name,
+                        usage.get('input_tokens', 0),
+                        usage.get('output_tokens', 0),
+                    )
+                except Exception:
+                    pass
+
+            # Output guardrails — redact PII from final response
+            if self.guardrails_manager:
+                final_content, filters = self.guardrails_manager.filter_output(final_content)
+                if filters:
+                    guardrail_flags = get_state_attr(state, 'guardrail_flags', []) or []
+                    guardrail_flags.append({"stage": "aggregation", "filters": filters})
+                    set_state_attr(state, 'guardrail_flags', guardrail_flags)
+
+            set_state_attr(state, 'final_response', final_content)
+            set_state_attr(state, 'status', ExecutionStatus.COMPLETED)
+            add_log(state, AgentType.ORCHESTRATOR, "Results aggregated successfully")
             await self.emit_event("execution_completed", state)
-            
+
+            # Fire non-blocking session evaluation
+            if self.judge and self.metrics_store:
+                import asyncio
+                async def _eval_session():
+                    try:
+                        eval_result = await self.judge.evaluate_session(user_request, final_content)
+                        session_id = get_state_attr(state, 'session_id', '')
+                        self.metrics_store.record_session_eval(session_id, eval_result)
+                        set_state_attr(state, 'evaluation_scores', eval_result.to_dict())
+                    except Exception as eval_err:
+                        logger.debug(f"Session evaluation failed (non-critical): {eval_err}")
+                task = asyncio.create_task(_eval_session())
+                task.add_done_callback(lambda t: logger.error(f"Session eval task failed: {t.exception()}") if t.exception() else None)
+
         except Exception as e:
             error_msg = f"Aggregation failed: {str(e)}"
-            if isinstance(state, dict):
-                state['status'] = ExecutionStatus.ERROR
-                state['error_message'] = error_msg
-                state['logs'].append({
-                    "timestamp": datetime.now().isoformat(),
-                    "agent_type": "orchestrator",
-                    "message": error_msg,
-                    "level": "error",
-                    "data": {}
-                })
-            else:
-                state.status = ExecutionStatus.ERROR
-                state.error_message = error_msg
-                state.add_log(
-                    AgentType.ORCHESTRATOR,
-                    state.error_message,
-                    level="error"
-                )
-        
+            set_state_attr(state, 'status', ExecutionStatus.ERROR)
+            set_state_attr(state, 'error_message', error_msg)
+            add_log(state, AgentType.ORCHESTRATOR, error_msg, level="error")
+
         return state

@@ -76,7 +76,12 @@ export function renderMarkdown(text) {
     return elements;
 }
 
+function escapeHtml(text) {
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 function processInline(text) {
+    text = escapeHtml(text);
     // Bold
     text = text.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
     // Italic
@@ -89,7 +94,7 @@ function processInline(text) {
 
 import { FileText, Bot, AlertTriangle, Download } from 'lucide-react';
 
-export function ResultDisplay({ status, result, error, artifacts }) {
+export function ResultDisplay({ status, result, error, artifacts, streamingText, isStreaming }) {
     const hasCharts = artifacts?.some(a => a.type === 'chart' || a.type === 'image');
 
     const handleDownload = () => {
@@ -144,6 +149,13 @@ export function ResultDisplay({ status, result, error, artifacts }) {
                         </div>
                         <h4>Ready to Execute</h4>
                         <p>Submit a request above to see results here</p>
+                    </div>
+                )}
+
+                {isStreaming && streamingText && !result && (
+                    <div className="result-markdown streaming">
+                        {renderMarkdown(streamingText)}
+                        <span className="streaming-cursor">|</span>
                     </div>
                 )}
 

@@ -11,6 +11,7 @@ export function useWebSocket(sessionId = null, onMessage = null) {
     const wsRef = useRef(null);
     const reconnectTimeoutRef = useRef(null);
     const onMessageRef = useRef(onMessage);
+    const intentionalDisconnectRef = useRef(false);
 
     // Update ref when callback changes
     useEffect(() => {
@@ -18,6 +19,7 @@ export function useWebSocket(sessionId = null, onMessage = null) {
     }, [onMessage]);
 
     const connect = useCallback(() => {
+        intentionalDisconnectRef.current = false;
         // Determine WebSocket URL
         const apiUrl = import.meta.env.VITE_API_URL || '';
         const isSecure = apiUrl.startsWith('https:');
@@ -52,7 +54,7 @@ export function useWebSocket(sessionId = null, onMessage = null) {
                 try {
                     const data = JSON.parse(event.data);
                     setLastMessage(data);
-                    setMessages(prev => [...prev, data]);
+                    setMessages(prev => [...prev.slice(-499), data]);
 
                     // Call callback if provided
                     if (onMessageRef.current) {
@@ -68,15 +70,18 @@ export function useWebSocket(sessionId = null, onMessage = null) {
                 setIsConnected(false);
                 wsRef.current = null;
 
-                // Attempt to reconnect after 3 seconds
-                reconnectTimeoutRef.current = setTimeout(() => {
-                    console.log('Attempting to reconnect...');
-                    connect();
-                }, 3000);
+                // Only reconnect if not intentionally disconnected
+                if (!intentionalDisconnectRef.current) {
+                    reconnectTimeoutRef.current = setTimeout(() => {
+                        console.log('Attempting to reconnect...');
+                        connect();
+                    }, 3000);
+                }
             };
 
             ws.onerror = (error) => {
                 console.error('WebSocket error:', error);
+                setIsConnected(false);
             };
 
             wsRef.current = ws;
@@ -86,6 +91,7 @@ export function useWebSocket(sessionId = null, onMessage = null) {
     }, [sessionId]);
 
     const disconnect = useCallback(() => {
+        intentionalDisconnectRef.current = true;
         if (reconnectTimeoutRef.current) {
             clearTimeout(reconnectTimeoutRef.current);
             reconnectTimeoutRef.current = null;

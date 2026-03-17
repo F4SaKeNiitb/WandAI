@@ -10,10 +10,14 @@ from langgraph.graph import StateGraph, END
 from langchain_core.output_parsers import JsonOutputParser
 from core.state import AgentState, ExecutionStatus, AgentType, StepStatus
 from core.orchestrator import Orchestrator
+from core.state_utils import (
+    get_state_attr, set_state_attr, get_status_value,
+    get_plan, get_step_attr, set_step_attr, get_step_status,
+    add_log, state_to_event,
+)
 from agents.researcher import ResearcherAgent
 from agents.coder import CoderAgent
 from agents.analyst import AnalystAgent
-from agents.writer import WriterAgent
 from agents.writer import WriterAgent
 from config import config
 from core.logging import get_logger
@@ -21,52 +25,96 @@ from core.logging import get_logger
 logger = get_logger('WORKFLOW')
 
 
-# Helper functions for dict-safe state access
-def get_state_attr(state, attr, default=None):
-    """Get attribute from state, handling both dict and object."""
-    if isinstance(state, dict):
-        return state.get(attr, default)
-    return getattr(state, attr, default)
-
-def set_state_attr(state, attr, value):
-    """Set attribute on state, handling both dict and object."""
-    if isinstance(state, dict):
-        state[attr] = value
-    else:
-        setattr(state, attr, value)
-
-def get_status_value(status):
-    """Get string value from status, handling both enum and string."""
-    if hasattr(status, 'value'):
-        return status.value
-    return str(status)
-
-
 class WorkflowManager:
     """
     Manages the LangGraph workflow for multi-agent orchestration.
     """
-    
+
     def __init__(self, event_callback=None):
         """
         Initialize the workflow manager.
-        
+
         Args:
             event_callback: Async function to emit real-time events
         """
         self.event_callback = event_callback
-        self.orchestrator = Orchestrator(event_callback)
-        
+
+        # Initialize cross-cutting services
+        from tracking.token_tracker import TokenTracker
+        from guardrails.manager import GuardrailsManager
+        from evaluation.judge import LLMJudge
+        from evaluation.metrics import MetricsStore
+
+        self.token_tracker = TokenTracker()
+        self.guardrails_manager = GuardrailsManager(
+            enabled=config.guardrails.enabled,
+            pii_redaction=config.guardrails.pii_redaction,
+            injection_detection=config.guardrails.injection_detection,
+            max_input_length=config.guardrails.max_input_length,
+        )
+        self.judge = LLMJudge()
+        self.metrics_store = MetricsStore()
+
+        # RAG pipeline (lazy — depends on chromadb being available)
+        self.rag_pipeline = None
+        try:
+            from rag.pipeline import RAGPipeline
+            self.rag_pipeline = RAGPipeline(
+                persist_dir=config.rag.chroma_persist_dir,
+                chunk_size=config.rag.chunk_size,
+                chunk_overlap=config.rag.chunk_overlap,
+                chroma_host=config.rag.chroma_host or None,
+                chroma_port=config.rag.chroma_port,
+            )
+        except Exception as e:
+            logger.warning(f"RAG pipeline init skipped: {e}")
+
+        # Agent memory (lazy — depends on chromadb)
+        self.agent_memory = None
+        if config.memory.enabled:
+            try:
+                from memory.long_term import AgentMemory
+                self.agent_memory = AgentMemory(
+                    persist_dir=config.memory.persist_dir,
+                    chroma_host=config.rag.chroma_host or None,
+                    chroma_port=config.rag.chroma_port,
+                    max_recall_results=config.memory.max_recall_results,
+                )
+            except Exception as e:
+                logger.warning(f"Agent memory init skipped: {e}")
+
+        # Shared kwargs for agent construction
+        self._agent_kwargs = dict(
+            event_callback=event_callback,
+            rag_pipeline=self.rag_pipeline,
+            memory=self.agent_memory,
+            token_tracker=self.token_tracker,
+            guardrails_manager=self.guardrails_manager,
+        )
+
+        self.orchestrator = Orchestrator(
+            event_callback,
+            token_tracker=self.token_tracker,
+            guardrails_manager=self.guardrails_manager,
+            judge=self.judge,
+            metrics_store=self.metrics_store,
+        )
+
         # Initialize agents
         self.agents = {
-            AgentType.RESEARCHER: ResearcherAgent(event_callback),
-            AgentType.CODER: CoderAgent(event_callback),
-            AgentType.ANALYST: AnalystAgent(event_callback),
-            AgentType.WRITER: WriterAgent(event_callback),
+            AgentType.RESEARCHER: ResearcherAgent(**self._agent_kwargs),
+            AgentType.CODER: CoderAgent(**self._agent_kwargs),
+            AgentType.ANALYST: AnalystAgent(**self._agent_kwargs),
+            AgentType.WRITER: WriterAgent(**self._agent_kwargs),
         }
-        
+
         # Load custom agents
         self._load_custom_agents()
+
+        # Resources to be initialized async (via self.initialize())
+        self.conn = None
+        self.memory = None  # AsyncSqliteSaver for LangGraph checkpointing
+        self.graph = None
     
     def _load_custom_agents(self):
         """Load custom agents from storage."""
@@ -83,7 +131,7 @@ class WorkflowManager:
                         prompt = agent_data.get("system_prompt")
                         if name and prompt:
                             # Register the new agent
-                            self.agents[name] = GenericAgent(name, prompt, self.event_callback)
+                            self.agents[name] = GenericAgent(name, prompt, **self._agent_kwargs)
                             logger.info(f"Registered custom agent: {name}")
         except Exception as e:
             logger.error(f"Failed to load custom agents: {e}")
@@ -101,7 +149,7 @@ class WorkflowManager:
             return False, f"Cannot overwrite built-in agent '{name}'"
 
         # Create and register
-        self.agents[name] = GenericAgent(name, system_prompt, self.event_callback)
+        self.agents[name] = GenericAgent(name, system_prompt, **self._agent_kwargs)
         
         # Persist
         try:
@@ -310,69 +358,106 @@ class WorkflowManager:
         return state.model_dump(exclude={'conversation_history'})
     
     async def _execute_step_node(self, state: AgentState) -> AgentState:
-        """Node: Execute the current step using appropriate agent."""
-        agent_type, step = await self.orchestrator.route_to_agent(state)
-        
-        if agent_type is None or step is None:
-            # No more steps to execute
+        """Node: Execute current step(s) using appropriate agent(s).
+
+        Supports parallel execution: all steps whose dependencies are satisfied
+        are dispatched concurrently via asyncio.gather().
+        """
+        import asyncio
+
+        executable_steps = await self.orchestrator.get_all_executable_steps(state)
+
+        if not executable_steps:
             return state
-        
-        agent = self.agents.get(agent_type)
-        if not agent:
-            state = await self.orchestrator.handle_step_result(
-                state, step.id, False, error=f"Unknown agent type: {agent_type}"
+
+        async def _run_single_step(agent_type_str: str, step):
+            """Execute a single step and return (step_id, success, result, error)."""
+            agent = self.agents.get(agent_type_str)
+            if not agent:
+                return step.id, False, None, f"Unknown agent type: {agent_type_str}"
+
+            success, result, error = await agent.execute_with_retry(
+                state, step.id, step.description
             )
-            return state
-        
-        # Execute the step
-        success, result, error = await agent.execute_with_retry(
-            state, step.id, step.description
-        )
-        
-        # Check if agent is requesting step-level clarification
+            return step.id, success, result, error
+
+        # If only one step, run it directly (no gather overhead)
+        if len(executable_steps) == 1:
+            agent_type, step = executable_steps[0]
+            step_id, success, result, error = await _run_single_step(agent_type, step)
+        else:
+            logger.info(f"Running {len(executable_steps)} steps in parallel: "
+                        f"{[s.id for _, s in executable_steps]}")
+
+            # Dispatch all executable steps in parallel
+            tasks = [
+                _run_single_step(agent_type, step)
+                for agent_type, step in executable_steps
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Process all results
+            for res in results:
+                if isinstance(res, Exception):
+                    logger.error(f"Parallel step exception: {res}")
+                    continue
+                sid, succ, result_val, err = res
+                # Check for step clarification
+                if isinstance(result_val, dict) and result_val.get("needs_clarification"):
+                    questions = result_val.get("questions", [])
+                    logger.info(f"Step '{sid}' needs clarification: {questions}")
+                    set_state_attr(state, 'status', ExecutionStatus.WAITING_STEP_CLARIFICATION)
+                    set_state_attr(state, 'step_clarification_step_id', sid)
+                    set_state_attr(state, 'step_clarification_questions', questions)
+                    for s in get_plan(state):
+                        if get_step_attr(s, 'id') == sid:
+                            set_step_attr(s, 'status', 'pending' if isinstance(s, dict) else StepStatus.PENDING)
+                            break
+                    if self.event_callback:
+                        await self.event_callback({
+                            "type": "step_clarification_needed",
+                            "session_id": get_state_attr(state, 'session_id', ''),
+                            "step_id": sid,
+                            "questions": questions
+                        })
+                    return state.model_dump(exclude={'conversation_history'}) if hasattr(state, 'model_dump') else state
+                state = await self.orchestrator.handle_step_result(
+                    state, sid, succ, result_val, err
+                )
+
+            return state.model_dump(exclude={'conversation_history'}) if hasattr(state, 'model_dump') else state
+
+        # Single step path: check for clarification
         if isinstance(result, dict) and result.get("needs_clarification"):
             questions = result.get("questions", [])
-            logger.info(f"❓ Step '{step.id}' needs clarification: {questions}")
-            
-            # Set step clarification state
-            if isinstance(state, dict):
-                state['status'] = ExecutionStatus.WAITING_STEP_CLARIFICATION.value
-                state['step_clarification_step_id'] = step.id
-                state['step_clarification_questions'] = questions
-                # Reset step status to pending so it can be re-executed
-                for s in state.get('plan', []):
-                    if s.get('id') == step.id:
-                        s['status'] = 'pending'
-                        break
-            else:
-                state.status = ExecutionStatus.WAITING_STEP_CLARIFICATION
-                state.step_clarification_step_id = step.id
-                state.step_clarification_questions = questions
-                # Reset step status
-                for s in state.plan:
-                    if s.id == step.id:
-                        s.status = StepStatus.PENDING
-                        break
-            
-            # Emit event for frontend
+            logger.info(f"Step '{step_id}' needs clarification: {questions}")
+
+            set_state_attr(state, 'status', ExecutionStatus.WAITING_STEP_CLARIFICATION)
+            set_state_attr(state, 'step_clarification_step_id', step_id)
+            set_state_attr(state, 'step_clarification_questions', questions)
+
+            for s in get_plan(state):
+                if get_step_attr(s, 'id') == step_id:
+                    set_step_attr(s, 'status', 'pending' if isinstance(s, dict) else StepStatus.PENDING)
+                    break
+
             if self.event_callback:
                 await self.event_callback({
                     "type": "step_clarification_needed",
-                    "session_id": state.session_id if hasattr(state, 'session_id') else state.get('session_id'),
-                    "step_id": step.id,
+                    "session_id": get_state_attr(state, 'session_id', ''),
+                    "step_id": step_id,
                     "agent_type": agent_type,
                     "questions": questions
                 })
-            
+
             return state.model_dump(exclude={'conversation_history'}) if hasattr(state, 'model_dump') else state
-        
+
         # Update state with result
         state = await self.orchestrator.handle_step_result(
-            state, step.id, success, result, error
+            state, step_id, success, result, error
         )
-        
-        # Return dict, excluding conversation_history to avoid overwriting concurrent chat updates
-        return state.model_dump(exclude={'conversation_history'})
+
+        return state.model_dump(exclude={'conversation_history'}) if hasattr(state, 'model_dump') else state
     
     async def _aggregate_results_node(self, state: AgentState) -> dict:
         """Node: Aggregate all results into final response."""
@@ -596,9 +681,15 @@ Please update the plan to address these pending requests."""
         except Exception as e:
             logger.warning(f"⚠️ [EXECUTE] Error clearing state: {e}")
         
-        # Run the graph
-        final_state = await self.graph.ainvoke(initial_state, config=config_dict)
-        
+        # Run the graph with root tracing span
+        from observability.tracing import get_tracer
+        tracer = get_tracer("wandai.workflow")
+        with tracer.start_as_current_span("workflow.execute", attributes={
+            "session.id": initial_state.session_id,
+            "request.length": len(user_request),
+        }):
+            final_state = await self.graph.ainvoke(initial_state, config=config_dict)
+
         return final_state
     
     async def resume_after_clarification(
@@ -991,7 +1082,8 @@ Please update the plan to address these pending requests."""
                             "message": f"Re-execution failed: {str(e)}"
                         })
             
-            asyncio.create_task(_execute_steps_directly())
+            task = asyncio.create_task(_execute_steps_directly())
+            task.add_done_callback(lambda t: logger.error(f"Plan update task failed: {t.exception()}") if t.exception() else None)
             logger.info(f"📝 [UPDATE_PLAN] Background task created, returning from update_plan")
         else:
             # Just update the plan, no re-run needed (pending steps updated in place)
@@ -1118,7 +1210,7 @@ Please update the plan to address these pending requests."""
             refinement_query = classification.get("refinement_query")
         except Exception as e:
             # Fallback to chat if classification fails
-            print(f"Intent classification failed: {e}")
+            logger.warning(f"Intent classification failed: {e}")
             intent = "CHAT"
     
         # Handle Refinement

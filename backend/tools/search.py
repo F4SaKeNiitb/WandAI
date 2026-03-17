@@ -23,15 +23,10 @@ async def search_web(query: str, max_results: int = 5) -> list[dict[str, Any]]:
     api_key = config.search.tavily_api_key
     
     if not api_key:
-        # Return mock data if no API key configured
-        return [
-            {
-                "url": "https://example.com/mock",
-                "title": f"Mock result for: {query}",
-                "content": f"This is a mock search result for the query '{query}'. Configure TAVILY_API_KEY to enable real search.",
-                "score": 0.9
-            }
-        ]
+        raise RuntimeError(
+            "TAVILY_API_KEY is not configured. Cannot perform web search. "
+            "Please set the TAVILY_API_KEY environment variable to enable real search."
+        )
     
     try:
         async with httpx.AsyncClient() as client:
