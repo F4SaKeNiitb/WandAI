@@ -56,7 +56,8 @@ class PlanStep(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     evaluation_score: dict | None = None  # LLM-as-judge evaluation
-    
+    data_quality_warning: bool = False
+
     class Config:
         use_enum_values = True
 

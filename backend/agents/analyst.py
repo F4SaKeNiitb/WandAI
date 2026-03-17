@@ -200,7 +200,7 @@ CRITICAL RULES:
 - If the context does not contain the numerical data needed for the chart, print "ERROR_MISSING_DATA: [describe what data is needed]" instead.
 - Do NOT use random numbers or placeholder values as substitutes for real data.
 
-Available libraries: json, datetime, re"""),
+Available libraries: any pip-installable library (auto-installed if missing). Blocked: os, sys, subprocess, socket."""),
                     ("user", "Create data for: {data_desc}\n\nContext: {context}")
                 ])
                 

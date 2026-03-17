@@ -11,10 +11,13 @@ from core.logging import get_logger
 
 logger = get_logger('DEPENDENCY')
 
-ALLOWED_PACKAGES = {
-    'numpy', 'pandas', 'matplotlib', 'scipy', 'scikit-learn',
-    'seaborn', 'plotly', 'requests', 'beautifulsoup4', 'openpyxl',
-    'xlrd', 'tabulate', 'pyyaml', 'pillow',
+# Packages that must never be installed — they provide dangerous capabilities
+# (reverse shells, network exploitation, system-level access, etc.)
+BLOCKED_PACKAGES = {
+    'paramiko', 'fabric', 'pexpect', 'pyautogui',
+    'pyperclip', 'keyboard', 'mouse', 'pynput',
+    'scapy', 'impacket', 'pwntools',
+    'psutil',
 }
 
 def is_safe_package_name(name: str) -> bool:
@@ -37,8 +40,8 @@ def install_package(package_name: str) -> Tuple[bool, str]:
     if not is_safe_package_name(package_name):
         return False, f"Invalid package name: {package_name}"
 
-    if package_name.lower() not in ALLOWED_PACKAGES:
-        return False, f"Package not in allowlist: {package_name}"
+    if package_name.lower() in BLOCKED_PACKAGES:
+        return False, f"Package '{package_name}' is blocked for security reasons"
 
     logger.info(f"📦 Installing dependency: {package_name}...")
 

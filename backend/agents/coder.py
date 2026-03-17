@@ -53,8 +53,10 @@ Guidelines:
 
 IMPORTANT:
 - Your code runs in a sandboxed environment
-- Available libraries: pandas, numpy, json, math, datetime, re, collections
-- Do NOT use: os, subprocess, sys, or file I/O
+- You can import and use most Python libraries (e.g. pandas, numpy, yfinance, requests, scipy, etc.)
+- If a library is not installed, it will be auto-installed at runtime
+- BLOCKED for security: os, sys, subprocess, shutil, socket, and other system-level modules
+- Do NOT use file I/O (open, pathlib)
 - All output must be via print() statements
 
 CRITICAL DATA INTEGRITY RULES:
@@ -110,7 +112,7 @@ Previous context:
 IMPORTANT:
 1. Write complete, executable code
 2. Use print() to output results
-3. Only use allowed libraries
+3. You can use any pip-installable library (it will be auto-installed if missing)
 4. If the previous context does NOT contain the actual data needed, print "ERROR_MISSING_DATA: [describe what data is missing]" instead of making up data
 5. NEVER simulate, fabricate, or generate dummy data as a substitute for real data
 6. You may ONLY use data values that appear explicitly in the "Previous context" above
@@ -186,6 +188,41 @@ IMPORTANT:
                 
                 return True, output, None
             else:
+                # Check if failure is due to a missing module — auto-install and retry
+                import re as _re
+                _missing_match = _re.search(r"No module named '([^']+)'", error or "")
+                if _missing_match:
+                    missing_module = _missing_match.group(1).split('.')[0]
+                    add_log(state, self.agent_type,
+                        f"Missing module '{missing_module}', attempting to install...",
+                        level="warning", step_id=step_id)
+                    from tools.dependency_manager import install_package
+                    inst_ok, inst_msg = install_package(missing_module)
+                    if inst_ok:
+                        add_log(state, self.agent_type,
+                            f"Installed '{missing_module}', retrying execution...",
+                            step_id=step_id)
+                        success_r, output_r, error_r = await self._execute_code(code)
+                        if success_r:
+                            add_artifact(state,
+                                name=f"code_{step_id}",
+                                artifact_type="code",
+                                content={
+                                    "code": code,
+                                    "output": output_r,
+                                    "explanation": result.get("explanation", "") + f" (Auto-installed {missing_module})"
+                                },
+                                created_by=self.agent_type,
+                                step_id=step_id
+                            )
+                            await self.emit_event("code_completed", state, {
+                                "step_id": step_id,
+                                "output_preview": output_r[:200] if output_r else "No output"
+                            })
+                            return True, output_r, None
+                        # If still failing after install, fall through to code-fix path
+                        error = error_r
+
                 # Try to fix the code
                 add_log(state,
                     self.agent_type,
@@ -193,7 +230,7 @@ IMPORTANT:
                     level="warning",
                     step_id=step_id
                 )
-                
+
                 fix_prompt = ChatPromptTemplate.from_messages([
                     ("system", self.system_prompt),
                     ("user", """The following code failed with an error. Please fix it.

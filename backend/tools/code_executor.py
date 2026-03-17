@@ -11,12 +11,17 @@ from contextlib import redirect_stdout, redirect_stderr
 from typing import Any
 import json
 
-# Allowed modules for sandboxed execution
-ALLOWED_MODULES = {
-    'json', 'math', 'datetime', 'collections', 're',
-    'statistics', 'random', 'itertools', 'functools',
-    'decimal', 'fractions', 'string', 'textwrap',
-    'pandas', 'numpy',
+# Blocked modules — these can be used for sandbox escape, filesystem access,
+# network abuse, or arbitrary process execution. Everything else is allowed.
+BLOCKED_MODULES = {
+    'os', 'sys', 'subprocess', 'shutil', 'pathlib',
+    'socket', 'http', 'urllib', 'ftplib', 'smtplib', 'telnetlib',
+    'ctypes', 'multiprocessing', 'threading', 'signal',
+    'importlib', 'pkgutil', 'code', 'codeop', 'compileall',
+    'webbrowser', 'antigravity', 'turtle',
+    'pickle', 'shelve', 'marshal',
+    'tempfile', 'glob', 'fnmatch',
+    'pty', 'termios', 'tty', 'resource', 'readline',
 }
 
 # Restricted names that cannot be accessed
@@ -37,17 +42,18 @@ BLOCKED_ATTRS = {
 
 import builtins
 
-def _make_safe_import(allowed_modules_map: dict):
-    """Create a restricted import function that only allows whitelisted modules."""
+_real_import = builtins.__import__
+
+def _make_safe_import():
+    """Create a restricted import function that blocks dangerous modules."""
     def safe_import(name, *args, **kwargs):
-        if name not in ALLOWED_MODULES:
+        # Block the module itself and any submodule (e.g. os.path)
+        root = name.split('.')[0]
+        if root in BLOCKED_MODULES:
             raise ImportError(
-                f"Import of '{name}' is not allowed. "
-                f"Allowed modules: {', '.join(sorted(ALLOWED_MODULES))}"
+                f"Import of '{name}' is blocked for security reasons."
             )
-        if name in allowed_modules_map:
-            return allowed_modules_map[name]
-        raise ImportError(f"Module '{name}' is allowed but not available in this environment.")
+        return _real_import(name, *args, **kwargs)
     return safe_import
 
 
@@ -76,54 +82,17 @@ def create_safe_globals() -> dict:
         if hasattr(builtins, name):
             safe_builtins[name] = getattr(builtins, name)
 
-    # Remove getattr to prevent attribute introspection escape
-    # (users can still access attributes via dot notation)
+    # Ensure packages installed to the isolated target dir are importable
+    _pkg_dir = '/tmp/wandai_packages'
+    if _pkg_dir not in sys.path:
+        sys.path.insert(0, _pkg_dir)
 
-    # Add allowed modules
-    import math
-    import datetime
-    import json as json_module
-    import collections
-    import re
-    import statistics
-    import random
-    import itertools
-    import functools
-
-    allowed_modules_map = {
-        'math': math,
-        'datetime': datetime,
-        'json': json_module,
-        'collections': collections,
-        're': re,
-        'statistics': statistics,
-        'random': random,
-        'itertools': itertools,
-        'functools': functools,
-    }
-
-    # Try to add pandas and numpy if available
-    try:
-        import pandas as pd
-        import numpy as np
-        allowed_modules_map['pandas'] = pd
-        allowed_modules_map['numpy'] = np
-    except ImportError:
-        pass
-
-    # Install safe import as the only way to import
-    safe_builtins['__import__'] = _make_safe_import(allowed_modules_map)
+    # Install blocklist-based safe import
+    safe_builtins['__import__'] = _make_safe_import()
 
     safe_globals = {
         '__builtins__': safe_builtins,
     }
-
-    # Pre-load allowed modules into globals for convenience
-    safe_globals.update(allowed_modules_map)
-    if 'pandas' in allowed_modules_map:
-        safe_globals['pd'] = allowed_modules_map['pandas']
-    if 'numpy' in allowed_modules_map:
-        safe_globals['np'] = allowed_modules_map['numpy']
 
     return safe_globals
 
